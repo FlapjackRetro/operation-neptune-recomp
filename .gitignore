@@ -14,3 +14,5 @@ build/
 build-dbg/
 work/nep_misses.txt
 *.ppm
+work/nep_misses_vga.txt
+work/vga_drv.bin

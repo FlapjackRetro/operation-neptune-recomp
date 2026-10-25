@@ -203,6 +203,11 @@ void bios_int10(CPU *cpu)
         if (cpu->al == 0) ega_set_palette_reg(cpu->bl, cpu->bh);
         else if (cpu->al == 2) for (int i = 0; i < 16; i++) ega_set_palette_reg(i, cpu->mem[seg_off(cpu->es, (uint16_t)(cpu->dx + i))]);
         else if (cpu->al == 0x10) ega_dac_set(cpu->bx, cpu->dh, cpu->ch, cpu->cl);
+        else if (cpu->al == 0x12 && getenv("NEP_DUMP_VGADRV") && cpu->mem[0x910] != 0xE9) {
+            FILE *df = fopen(getenv("NEP_DUMP_VGADRV"), "wb");          /* the patched video driver, to be lifted */
+            if (df) { fwrite(cpu->mem + 0x910, 1, 0x1070 - 0x910, df); fclose(df); }
+            for (int i = 0; i < cpu->cx; i++) { uint32_t a = seg_off(cpu->es, (uint16_t)(cpu->dx + 3 * i));
+                ega_dac_set(cpu->bx + i, cpu->mem[a], cpu->mem[a + 1], cpu->mem[a + 2]); } }
         else if (cpu->al == 0x12) for (int i = 0; i < cpu->cx; i++) { uint32_t a = seg_off(cpu->es, (uint16_t)(cpu->dx + 3 * i));
             ega_dac_set(cpu->bx + i, cpu->mem[a], cpu->mem[a + 1], cpu->mem[a + 2]); }
         break;
@@ -292,7 +297,7 @@ void port_out16(CPU *cpu, uint16_t port, uint16_t v) { port_out8(cpu, port, (uin
 
 int nep_load_image(CPU *cpu, const char *path)
 {
-    g_cpu = cpu;
+    g_cpu = cpu; g_vga_mem = cpu->mem;
     for (int v = 0; v < 256; v++) { g_vec_seg[v] = BIOS_SEG; g_vec_off[v] = BIOS_IRET; }
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return -1; }
@@ -385,6 +390,15 @@ static struct { const char *name; unsigned long n; } g_census[CENSUS_N];
 static int g_census_on;
 void recomp_enter(const char *fn)
 {
+    static int dbg = -1;
+    if (dbg < 0) dbg = getenv("NEP_DSWATCH") != NULL;
+    if (dbg && g_cpu) {      /* NEP_DSWATCH: log DS changes with the last functions entered */
+        static const char *ring[24]; static int rp, fired, last_ds = 0x2343;
+        ring[rp++ % 24] = fn;
+        if (g_cpu->ds != last_ds) { fprintf(stderr, "[ds] %04X -> %04X (cs=%04X) recent:", last_ds, g_cpu->ds, g_cpu->cs);
+            for (int i = 1; i <= 8; i++) fprintf(stderr, " %s", ring[(rp - i + 48) % 24] ? ring[(rp - i + 48) % 24] : "-");
+            fprintf(stderr, "\n"); last_ds = g_cpu->ds; if (++fired > 40) dbg = 0; }
+    }
     if (!g_census_on) return;
     unsigned h = (unsigned)(((uintptr_t)fn >> 3) * 2654435761u) % CENSUS_N;
     for (int i = 0; i < CENSUS_N; i++, h = (h + 1) % CENSUS_N) {

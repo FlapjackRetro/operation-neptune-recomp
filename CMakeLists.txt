@@ -9,7 +9,7 @@ if(NOT MSVC)
 endif()
 
 # gen/ is written by tools/lift_full.py (git-ignored)
-file(GLOB GENERATED gen/recomp_*.c)
+file(GLOB GENERATED gen/recomp_*.c gen/vga_*.c)
 if(NOT GENERATED)
   message(FATAL_ERROR "gen/ is empty: run tools/lift_full.py first")
 endif()

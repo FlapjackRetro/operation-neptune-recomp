@@ -232,3 +232,22 @@ clear whether the game draws through a path the hooks miss. Next: find what
 fn_0B3A7's screen draws, MPU-401/AdLib probing (port 331/388 loops time out
 cleanly), SDL2 window + real keyboard/mouse, EGA.DRV is named by the exe but
 absent.
+
+## VGA path (2026-10-25): the palette and the "correct game start"
+
+- On VGA hardware (INT 10h AX=1A00 returns AL=1A, BL=7/8) `fn_02812` sets `ds:[588F]=5`.
+  `fn_029A9` then loads the game's 256-entry DAC table (DGROUP+0x13C, INT 10h AX=1012)
+  and `fn_02904` calls `fn_03926(0x91, 0, 1)`, which **overwrites the whole video driver
+  segment** (image 0x910..0x1070, EGA planar routines) with mode-13h (320x200x256)
+  routines, including the jump vectors (`EB 3A 90` / `E9 rel16`).
+- The patched bytes cannot be lifted from the file. `NEP_DUMP_VGADRV=work/vga_drv.bin ./build/nep ...`
+  (NEP_VGA=1) dumps them from a run; `NEP_VARIANT=vga python3 tools/lift_full.py` lifts them
+  as `fv_*` into `gen/vga_*.c` and `recomp_dispatch` uses them whenever the live stub at
+  image 0x910 is no longer `E9`. Dispatch misses in that range go to `work/nep_misses_vga.txt`.
+  `tools/converge.sh` with `NEP_VGA=1` does all of it.
+- Frame check: with NEP_VGA=1 the first frame has background (16,16,16), land (4,65,0), grid (65,32,0),
+  identical to the DOSBox-X reference. Without NEP_VGA the EGA planar path renders the same scene
+  in EGA colours.
+- Bad forced starts that broke things: 00E03 (mid-instruction; E02 is the `es:` prefix), 00A40/003C0
+  (`jmp cs:[bx+..]` seen with ds=FFFF), C7CB0 (timer ISR chained through a corrupted vector).
+  They appear in the miss file when the game runs with the wrong video driver; remove them.

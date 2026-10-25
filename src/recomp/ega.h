@@ -12,5 +12,6 @@ void    ega_set_palette_reg(int idx, int val);
 void    ega_stats(void);
 int     ega_dump_planes(const char *path);
 int     ega_dump_ppm(const char *path);           /* composed screen */
+extern  uint8_t *g_vga_mem;                        /* guest memory (mode 13h frame buffer at A0000) */
 extern  uint16_t g_ega_start;                      /* CRTC start address */
 #endif

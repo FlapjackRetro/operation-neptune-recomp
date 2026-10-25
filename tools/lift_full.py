@@ -59,6 +59,12 @@ decode16.EMU87_INTS = True
 DEFAULT_EXE = os.path.join(os.path.dirname(ROOT), "ON.EXE")
 OUT = os.path.join(ROOT, "gen")
 CHUNK = 60
+# The VGA video driver: type-5 hardware makes fn_03926 overwrite the driver
+# segment (image 0x910..0x1070, EGA planar routines) with mode-13h routines.
+# The patched bytes are dumped from a run (NEP_DUMP_VGADRV) to work/vga_drv.bin
+# and lifted as a variant (fv_*), dispatched when the live stub is not E9.
+VARIANT = os.environ.get("NEP_VARIANT") == "vga"
+V_LO, V_HI = 0x94C, 0x1070
 ENTRY_IMG = 0x0000                      # MZ CS:IP = 0000:0000
 
 
@@ -314,6 +320,11 @@ class X87Lifter(Lifter):
 def main():
     exe = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EXE
     data = open(exe, "rb").read()
+    if VARIANT:
+        blob = open(os.path.join(ROOT, "work", "vga_drv.bin"), "rb").read()
+        data = bytearray(data)
+        data[0x3600 + 0x910:0x3600 + 0x910 + len(blob)] = blob
+        data = bytes(data)
 
     a = analyze.Analyzer(data)
     a.find_overlays()
@@ -518,6 +529,34 @@ def main():
             if io in OVERRIDES:
                 res["overridden"].append(name)
                 continue
+            if VARIANT and not (V_LO <= io < V_HI):
+                if 0x910 <= io < V_LO and (io - 0x910) % 3 == 0:    # patched jump vector: seed its target
+                    b0 = data[io + HDR]
+                    if b0 == 0xE9:
+                        res["tail"].add(0x910 + ((io - 0x910 + 3 + int.from_bytes(data[io+HDR+1:io+HDR+3], "little")) & 0xFFFF))
+                    elif b0 == 0xEB:
+                        r8 = data[io + HDR + 1]; r8 -= 256 if r8 > 127 else 0
+                        res["tail"].add(io + 2 + r8)
+                continue
+            if not VARIANT and 0x910 <= io < 0x94C and (io - 0x910) % 3 == 0 and data[io + HDR] == 0xE9:
+                # Video-driver jump vector: `jmp rel16` stubs that the driver's
+                # init rewrites at run time to select the EGA/VGA routines.
+                # Lifting the static bytes would freeze the initial targets, so
+                # decode the jmp from guest memory on every call.
+                rel0 = int.from_bytes(data[io + HDR + 1:io + HDR + 3], "little")
+                t0 = 0x910 + ((io - 0x910 + 3 + rel0) & 0xFFFF)
+                res["tail"].add(t0)
+                res["bodies"].append(
+                    f"void {name}(CPU *cpu)\n{{\n    cpu->cs = 0x91;\n"
+                    f"    uint32_t a = 0x{io:05X}u;\n"
+                    f"    uint16_t off = 0; int ok = 1;\n"
+                    f"    if (cpu->mem[a] == 0xE9) off = (uint16_t)(a - 0x910 + 3 + (uint16_t)(cpu->mem[a + 1] | (cpu->mem[a + 2] << 8)));\n"
+                    f"    else if (cpu->mem[a] == 0xEB) off = (uint16_t)(a - 0x910 + 2 + (int8_t)cpu->mem[a + 1]);\n"
+                    f"    else ok = 0;\n"
+                    f"    if (ok && !recomp_dispatch(cpu, 0x91, off)) cpu->sp += 4;\n"
+                    f"}}")
+                res["lifted"] += 1
+                continue
             try:
                 insns, jt, _, jbases = decode_func(io, end, cs, infer=True)
                 base = cs * 16
@@ -609,7 +648,7 @@ def main():
     # Dispatch-miss feedback: addresses the runtime failed to dispatch (written
     # by nep to work/nep_misses.txt) are real code the static pass never named.
     miss_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "work", "nep_misses.txt")
+                             "work", "nep_misses_vga.txt" if VARIANT else "nep_misses.txt")
     fed = set()
     if os.path.exists(miss_file):
         for ln in open(miss_file):
@@ -717,6 +756,35 @@ def main():
 
     names = [n for n, _, _ in funcs]
     stubs = sorted(c for c in all_calls if c not in set(names))
+    if VARIANT:
+        import re
+        vf = [(n, io_) for n, io_, _ in funcs if V_LO <= io_ < V_HI and io_ not in OVERRIDES]
+        ren = lambda t: re.sub(r"\bfn_([0-9A-F]{5})\b",
+                               lambda m: ("fv_" + m[1]) if V_LO <= int(m[1], 16) < V_HI else m[0], t)
+        vb = [ren(b) for b in bodies]
+        for old in os.listdir(OUT):
+            if old.startswith("vga_"):
+                os.remove(os.path.join(OUT, old))
+        with open(os.path.join(OUT, "vga_000.c"), "w") as f:
+            f.write('#include "recomp_all.h"\n')
+            for n, _ in vf:
+                f.write(f"void {ren(n)}(CPU *cpu);\n")
+            f.write("\n" + "\n\n".join(vb) + "\n")
+        with open(os.path.join(OUT, "vga_dispatch.c"), "w") as f:
+            f.write('#include "recomp_all.h"\n')
+            for n, _ in vf:
+                f.write(f"void {ren(n)}(CPU *cpu);\n")
+            f.write("typedef void (*vfn)(CPU *);\ntypedef struct { unsigned addr; vfn fn; } VEnt;\n")
+            f.write(f"static const VEnt g_v[{len(vf)}] = {{\n")
+            for n, io_ in sorted(vf, key=lambda t: t[1]):
+                f.write(f"  {{0x{io_:05X}, {ren(n)}}},\n")
+            f.write("};\n")
+            f.write(f"int recomp_dispatch_v(CPU *cpu, unsigned addr) {{\n    int lo = 0, hi = {len(vf) - 1};\n"
+                    "    while (lo <= hi) { int mid = (lo + hi) / 2;\n"
+                    "        if (g_v[mid].addr == addr) { g_v[mid].fn(cpu); return 1; }\n"
+                    "        if (g_v[mid].addr < addr) lo = mid + 1; else hi = mid - 1; }\n    return 0;\n}\n")
+        print(f"variant vga: {len(vf)} functions -> {OUT}/vga_*.c")
+        return
     for old in os.listdir(OUT):
         if old.startswith("recomp_") and old.endswith((".c", ".h")):
             os.remove(os.path.join(OUT, old))
@@ -740,8 +808,11 @@ def main():
     # Dispatch table (indirect call/jmp by address) and stubs for call targets
     # that resolved to nothing. Image-space linear address = seg*16 + off.
     live = sorted((io, n) for n, io, _ in funcs)
+    if not os.path.exists(os.path.join(OUT, "vga_dispatch.c")):
+        with open(os.path.join(OUT, "vga_dispatch.c"), "w") as f:
+            f.write('#include "recomp_all.h"\nint recomp_dispatch_v(CPU *cpu, unsigned addr) { (void)cpu; (void)addr; return 0; }\n')
     with open(os.path.join(OUT, "recomp_dispatch.c"), "w") as f:
-        f.write('#include "recomp_all.h"\n#include <execinfo.h>\n#include <stdio.h>\n#include <stdlib.h>\n\n')
+        f.write('#include "recomp_all.h"\n#include <execinfo.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n')
         f.write("typedef void (*recomp_fn)(CPU *);\n")
         f.write("typedef struct { unsigned addr; recomp_fn fn; } DispEntry;\n")
         f.write(f"static const DispEntry g_disp[{len(live)}] = {{\n")
@@ -752,22 +823,34 @@ def main():
         f.write("""
 /* in-range misses are recorded for the next lift round (dispatch feedback) */
 #define MAXMISS 4096
-static unsigned g_miss[MAXMISS]; static int g_nmiss;
+static unsigned g_miss[MAXMISS], g_missv[MAXMISS]; static int g_nmiss, g_nmissv;
 static int g_trace = -1;
-static void note_miss(unsigned addr) {
-    for (int i = 0; i < g_nmiss; i++) if (g_miss[i] == addr) return;
-    if (g_nmiss < MAXMISS) g_miss[g_nmiss++] = addr;
+static void note_miss(unsigned addr, int vga) {
+    unsigned *m = vga ? g_missv : g_miss; int *n = vga ? &g_nmissv : &g_nmiss;
+    for (int i = 0; i < *n; i++) if (m[i] == addr) return;
+    if (*n < MAXMISS) m[(*n)++] = addr;
 }
-void recomp_dump_misses(const char *path) {
+static void dump_one(const char *path, unsigned *m, int *n, int vga) {
     FILE *r = fopen(path, "r");
-    if (r) { unsigned a; while (fscanf(r, "%x", &a) == 1) note_miss(a); fclose(r); }
+    if (r) { unsigned a; while (fscanf(r, "%x", &a) == 1) note_miss(a, vga); fclose(r); }
     FILE *w = fopen(path, "w"); if (!w) return;
-    for (int i = 0; i < g_nmiss; i++) fprintf(w, "%05X\\n", g_miss[i]);
+    for (int i = 0; i < *n; i++) fprintf(w, "%05X\\n", m[i]);
     fclose(w);
 }
+/* path = work/nep_misses.txt; the VGA-driver variant's misses go beside it */
+void recomp_dump_misses(const char *path) {
+    char v[600]; snprintf(v, sizeof v, "%s", path);
+    char *dot = strrchr(v, '.'); if (dot) *dot = 0;
+    strcat(v, "_vga.txt");
+    dump_one(path, g_miss, &g_nmiss, 0);
+    if (g_nmissv) dump_one(v, g_missv, &g_nmissv, 1);
+}
 /* 1 = dispatched, 0 = no function at that address */
+int recomp_dispatch_v(CPU *cpu, unsigned addr);
 int recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
     unsigned addr = ((seg << 4) + off) & 0xFFFFF;
+    /* VGA driver patched in (stub 0 is no longer E9): its own routines */
+    if (addr >= 0x94C && addr < 0x1070 && cpu->mem[0x910] != 0xE9 && recomp_dispatch_v(cpu, addr)) return 1;
     int lo = 0, hi = N_DISP - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
@@ -775,7 +858,7 @@ int recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
         if (g_disp[mid].addr < addr) lo = mid + 1; else hi = mid - 1;
     }
     if (g_trace < 0) g_trace = getenv("NEP_TRACE") != NULL;
-    if (addr && off < 0xFF00) note_miss(addr);   /* offsets near 0xFFFF are negative-wrapped garbage */
+    if (addr && off < 0xFF00) note_miss(addr, addr >= 0x94C && addr < 0x1070 && cpu->mem[0x910] != 0xE9);   /* offsets near 0xFFFF are negative-wrapped garbage */
     if (g_trace) {
         fprintf(stderr, "[disp] MISS %04X:%04X (image %05X) ds=%04X; from:\\n", seg, off, addr, cpu->ds);
         void *bt[6]; int n = backtrace(bt, 6); backtrace_symbols_fd(bt + 1, n - 1, 2);

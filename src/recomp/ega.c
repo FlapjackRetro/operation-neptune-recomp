@@ -41,9 +41,11 @@ void ega_set_page(int page)
 }
 int ega_graphics(void) { return g_mode >= 0x0D && g_mode <= 0x10; }
 
+extern uint8_t *g_vga_mem;
 void ega_set_mode(int mode, int clear)
 {
     g_mode = mode;
+    if (mode == 0x13 && clear && g_vga_mem) memset(g_vga_mem + 0xA0000, 0, 64000);
     if (clear) memset(plane, 0, sizeof plane);
     seq_map = 0x0F; memset(gc, 0, sizeof gc); gc[6] = 0x05; gc[7] = 0x0F; gc[8] = 0xFF;
     g_ega_start = 0;
@@ -134,6 +136,7 @@ int recomp_mem_read8(CPU *cpu, uint32_t addr, uint8_t *outv)
     *outv = r; return 1;
 }
 
+#define DAC8(v) ((uint8_t)(((v) << 2) | ((v) >> 4)))   /* 6-bit DAC -> 8-bit, as VGA hardware/DOSBox do */
 static void rgb(int c, uint8_t *o)
 {
     o[0] = (uint8_t)(((c >> 2 & 1) * 0xAA) + ((c >> 5 & 1) * 0x55));
@@ -141,8 +144,16 @@ static void rgb(int c, uint8_t *o)
     o[2] = (uint8_t)(((c & 1) * 0xAA) + ((c >> 3 & 1) * 0x55));
 }
 
+uint8_t *g_vga_mem;                     /* guest memory, for mode 13h (linear A000:0) */
 int ega_dump_ppm(const char *path)
 {
+    if (g_mode == 0x13 && g_vga_mem) {        /* 320x200x256, straight DAC lookup */
+        FILE *f = fopen(path, "wb"); if (!f) return -1;
+        fprintf(f, "P6\n320 200\n255\n"); dac_init();
+        for (int i = 0; i < 64000; i++) { uint8_t *d = dac[g_vga_mem[0xA0000 + i]];
+            uint8_t px[3] = { DAC8(d[0]), DAC8(d[1]), DAC8(d[2]) }; fwrite(px, 1, 3, f); }
+        fclose(f); return 0;
+    }
     int w = g_mode == 0x0D ? 320 : 640, h = g_mode == 0x10 ? 350 : 200;
     if (!ega_graphics()) return -1;
     FILE *f = fopen(path, "wb"); if (!f) return -1;
@@ -153,7 +164,7 @@ int ega_dump_ppm(const char *path)
             uint16_t o = (uint16_t)(g_ega_start + y * bpl + x / 8); int bit = 7 - (x & 7);
             int c = 0;
             for (int p = 0; p < 4; p++) c |= (plane[p][o] >> bit & 1) << p;
-            dac_init(); uint8_t *d = dac[attr_pal[c]]; uint8_t px[3] = { (uint8_t)(d[0] * 255 / 63), (uint8_t)(d[1] * 255 / 63), (uint8_t)(d[2] * 255 / 63) }; fwrite(px, 1, 3, f);
+            dac_init(); uint8_t *d = dac[attr_pal[c]]; uint8_t px[3] = { DAC8(d[0]), DAC8(d[1]), DAC8(d[2]) }; fwrite(px, 1, 3, f);
         }
     fclose(f); return 0;
 }
