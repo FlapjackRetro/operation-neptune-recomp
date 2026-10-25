@@ -15,13 +15,14 @@
 #include "x87.h"
 #include "ega.h"
 #include "frontend.h"
-#include <unistd.h>
 #include <ctype.h>
 #include <dirent.h>
-#include <execinfo.h>
+#include "portable.h"
 #include <pthread.h>
 #include <setjmp.h>
+#ifndef _WIN32
 #include <signal.h>
+#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -435,6 +436,7 @@ static void census_dump(const char *path)
 
 extern void fn_00000(CPU *cpu);
 
+#ifndef _WIN32
 static pthread_t g_run_thread;
 static void on_usr1(int sig)
 {
@@ -444,9 +446,9 @@ static void on_usr1(int sig)
     backtrace_symbols_fd(bt, n, 2);
     _exit(3);
 }
-static void on_alarm(int sig)
+#endif
+static void watchdog_report(void)
 {
-    (void)sig;
     fprintf(stderr, "\n[watchdog] time limit reached: cs=%04X ds=%04X ss:sp=%04X:%04X, %u DOS calls\n",
             g_cpu->cs, g_cpu->ds, g_cpu->ss, g_cpu->sp, g_dos_calls);
     recomp_dump_misses("work/nep_misses.txt");
@@ -454,19 +456,35 @@ static void on_alarm(int sig)
     if (getenv("NEP_TEXT")) for (int r = 0; r < 25; r++) { char ln[81]; for (int c = 0; c < 80; c++) { uint8_t ch = g_cpu->mem[0xB8000 + (r * 80 + c) * 2]; ln[c] = ch >= 32 && ch < 127 ? (char)ch : ' '; } ln[80] = 0; fprintf(stderr, "|%s\n", ln); }
     ega_stats();
     { const char *o = getenv("NEP_PLANES"); if (o) ega_dump_planes(o); }
+}
+#ifndef _WIN32
+static void on_alarm(int sig)
+{
+    (void)sig;
+    watchdog_report();
     pthread_kill(g_run_thread, SIGUSR1);        /* backtrace from the guest thread */
     sleep(2);
     _exit(3);
 }
+#else
+static unsigned g_wd_seconds;
+static void *wd_thread(void *arg) { (void)arg; Sleep(g_wd_seconds * 1000u); watchdog_report(); fflush(stderr); _exit(3); return NULL; }
+#endif
 
 void nep_run(CPU *cpu)
 {
     g_trace = getenv("NEP_TRACE") != NULL;
     g_census_on = getenv("NEP_CENSUS") != NULL;
     const char *s = getenv("NEP_SECONDS");
+    /* Watchdog: always when headless (default 20 s); with a window only if NEP_SECONDS is set. */
+    unsigned wd = s ? (unsigned)atoi(s) : (fe_available() ? 0 : 20);
+#ifndef _WIN32
     g_run_thread = pthread_self();
     signal(SIGUSR1, on_usr1);
-    signal(SIGALRM, on_alarm); alarm(s ? (unsigned)atoi(s) : 20);
+    signal(SIGALRM, on_alarm); if (wd) alarm(wd);
+#else
+    if (wd) { pthread_t t; g_wd_seconds = wd; pthread_create(&t, NULL, wd_thread, NULL); }
+#endif
     cpu->flags |= FLAG_IF;
     if (setjmp(g_exit_jmp) == 0) fn_00000(cpu);
     recomp_dump_misses("work/nep_misses.txt");

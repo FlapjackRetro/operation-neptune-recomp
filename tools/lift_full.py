@@ -812,7 +812,7 @@ def main():
         with open(os.path.join(OUT, "vga_dispatch.c"), "w") as f:
             f.write('#include "recomp_all.h"\nint recomp_dispatch_v(CPU *cpu, unsigned addr) { (void)cpu; (void)addr; return 0; }\n')
     with open(os.path.join(OUT, "recomp_dispatch.c"), "w") as f:
-        f.write('#include "recomp_all.h"\n#include <execinfo.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n')
+        f.write('#include "recomp_all.h"\n#include "portable.h"\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n')
         f.write("typedef void (*recomp_fn)(CPU *);\n")
         f.write("typedef struct { unsigned addr; recomp_fn fn; } DispEntry;\n")
         f.write(f"static const DispEntry g_disp[{len(live)}] = {{\n")
