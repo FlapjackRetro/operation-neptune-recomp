@@ -12,7 +12,8 @@ src/gen/
 __pycache__/
 build/
 build-dbg/
-work/nep_misses.txt
 *.ppm
-work/nep_misses_vga.txt
+work/vga_drv.bin
+.pcrecomp/
+play.bat
 work/vga_drv.bin

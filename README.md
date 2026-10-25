@@ -27,7 +27,20 @@ recomp/
   NOTES.md            findings and open questions
 ```
 
-## Usage
+## Install (Windows)
+
+You need your own copy of the original game (`ON.EXE`, `NEP000-002.DAT`). Put this `recomp` folder inside the game
+folder (or pass the path) and run:
+
+```
+install.bat                      (or: powershell -ExecutionPolicy Bypass -File install.ps1 -GameDir C:\DOS\Neptune)
+```
+
+It installs MSYS2 + toolchain + SDL2 if missing, fetches pcrecomp, lifts your `ON.EXE` to C, builds `build\nep.exe`
+and writes `play.bat`. No game data is included in this repo or uploaded anywhere. Options: `NEP_AUDIO=speaker`
+(PC speaker), `NEP_VSYNC_DIV=n`.
+
+## Usage (manual / analysis)
 
 Clone pcrecomp somewhere and point `PCRECOMP` at it:
 
