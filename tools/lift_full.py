@@ -101,6 +101,93 @@ def build_segmap(ends, decode):
     return cs_of
 
 
+def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
+    """Arms of each `jmp word cs:[bx+table]` -- a Borland switch.
+
+    The table is a run of near offsets in the code segment; nothing names the
+    arms but this one instruction. The preceding `cmp bx, N` / `jbe` bounds it,
+    failing that take entries while they land on an instruction boundary inside
+    this function. Two shapes (dinopark found both):
+
+      dense:   cmp bx, N / jbe / jmp default / shl bx, 1 / jmp cs:[bx+table]
+      sparse:  mov cx, N / mov bx, values / ... / jmp cs:[bx + N*2]
+               (bx walks a list of case VALUES; arm offsets follow the values)
+
+    The table sits at CS*16 + disp, so a wrong CS reads junk. With infer=True,
+    a switch that fails under the supplied CS is retried against every
+    paragraph-aligned base up to 64K below the function; if exactly one base
+    gives a table whose arms all land on instruction boundaries (and whose
+    length matches the `cmp` bound), that base is taken as the true CS.
+
+    Arms are accepted when they land inside the function ([lo, hi)), not on a
+    decoded instruction boundary: the table lives in the code stream, so the
+    linear decode runs through it and desyncs. The caller re-decodes around the
+    returned table extents and verifies the arms afterwards.
+
+    Returns ({jmp instruction address: [absolute arm addresses]}, [inferred
+    segment values], [(table start, table end) image offsets]).
+    """
+    out, inferred, tabs = {}, [], []
+
+    def arms_at(base, ins, o, bx_imm, cx_imm, bound):
+        if bx_imm is not None and cx_imm and o.disp == cx_imm * 2:
+            bnd, start = cx_imm, base + bx_imm + o.disp
+        else:
+            bnd, start = bound, base + o.disp
+        arms = []
+        for k in range(bnd if bnd else 256):
+            a = start + k * 2 + hdr
+            if a < 0 or a + 2 > len(data):
+                break
+            t = base + int.from_bytes(data[a:a + 2], 'little')
+            if not (lo <= t < hi):
+                break
+            arms.append(t)
+        if arms and (bnd is None or len(arms) == bnd) and (bnd or len(arms) >= 3):
+            first = base + bx_imm if (bx_imm is not None and cx_imm
+                                      and o.disp == cx_imm * 2) else start
+            return arms, (first, start + 2 * len(arms))
+        return None
+
+    for idx, ins in enumerate(insns):
+        o = ins.op1
+        if ins.mnemonic != 'jmp' or not o or o.type != OpType.MEM:
+            continue
+        if o.base != 'bx' or o.seg != 'cs':
+            continue
+        bound = bx_imm = cx_imm = None
+        for j in insns[max(0, idx - 16):idx]:
+            if not (j.op1 and j.op1.type == OpType.REG16 and j.op2
+                    and j.op2.type in (OpType.IMM8, OpType.IMM16)):
+                continue
+            reg = repr(j.op1)
+            if j.mnemonic == 'cmp':
+                bound = j.op2.disp + 1
+            elif j.mnemonic == 'mov' and reg == 'bx':
+                bx_imm = j.op2.disp
+            elif j.mnemonic == 'mov' and reg == 'cx':
+                cx_imm = j.op2.disp
+        got = arms_at(cs * 16, ins, o, bx_imm, cx_imm, bound)
+        if got:
+            out[ins.address] = got[0]
+            tabs.append(got[1])
+            continue
+        if not infer or io is None:
+            continue
+        found = {}
+        lo = max(0, (io - 0xFFF0) & ~0xF)
+        for base in range(lo, io + 1, 16):
+            got = arms_at(base, ins, o, bx_imm, cx_imm, bound)
+            if got:
+                found[base] = got
+        if len(found) == 1:
+            (base, got), = found.items()
+            out[ins.address] = got[0]
+            tabs.append(got[1])
+            inferred.append(base >> 4)
+    return out, inferred, tabs
+
+
 def main():
     exe = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EXE
     data = open(exe, "rb").read()
@@ -168,14 +255,62 @@ def main():
                 return ins.offset + ins.length
         return None
 
+    def decode_func(io, end, cs, infer=False):
+        """Decode a function around its switch tables.
+
+        Linear decode first to find the tables, then decode again skipping the
+        table bytes so the arms land on real instruction boundaries. A switch
+        whose arms still miss a boundary is dropped (it dispatches at runtime).
+        """
+        insns = Decoder(data[io + HDR:end + HDR], base_offset=io).decode_all()
+        jt, inf, tabs = jump_tables(data, HDR, insns, cs, io, end, io=io, infer=infer)
+        if tabs:
+            cuts, pos = [], io
+            for ts, te in sorted(tabs):
+                ts, te = max(ts, pos), min(te, end)
+                if ts >= te:
+                    continue
+                cuts.append((pos, ts))
+                pos = te
+            cuts.append((pos, end))
+            insns = []
+            for a_, b_ in cuts:
+                if b_ > a_:
+                    insns += Decoder(data[a_ + HDR:b_ + HDR], base_offset=a_).decode_all()
+            offs = {x.offset for x in insns}
+            jt = {k: v for k, v in jt.items() if all(t in offs for t in v)}
+        return insns, jt, inf
+
+    # Segment inference from switch tables: where the segment map guessed wrong
+    # the table reads junk; a base that makes every arm land on an instruction
+    # boundary is the real CS. Applied before lifting so wrap fixing, SEG_xxxx
+    # and `push cs` all see it.
+    cs_over, cs_conflict = {}, 0
+    for name, io, end in funcs:
+        try:
+            _, _, inf = decode_func(io, end, cs_of(io), infer=True)
+        except Exception:
+            continue
+        if inf:
+            if len(set(inf)) > 1:
+                cs_conflict += 1
+                continue
+            cs_over[io] = inf[0]
+    if cs_over:
+        print(f"  segment overrides from switch tables: {len(cs_over)} functions "
+              f"({cs_conflict} ambiguous, skipped)")
+    _cs_of = cs_of
+    cs_of = lambda fn: cs_over.get(fn, _cs_of(fn))
+
     def lift_pass(funcs, known):
         os.makedirs(OUT, exist_ok=True)
-        res = dict(bodies=[], calls=set(), lifted=0, failed=[], wrapped=0, segs=set())
+        res = dict(bodies=[], calls=set(), lifted=0, failed=[], wrapped=0, segs=set(),
+                   switches=0, arms=0, switch_total=0)
         for name, io, end in funcs:
             cs = cs_of(io)
             res["segs"].add(cs)
             try:
-                insns = Decoder(data[io + HDR:end + HDR], base_offset=io).decode_all()
+                insns, jt, _ = decode_func(io, end, cs, infer=True)
                 base = cs * 16
                 for ins in insns:             # wrap-correct near call/jmp targets
                     o = ins.op1
@@ -187,6 +322,26 @@ def main():
                 lifter = Lifter(hdr_size=HDR, known_funcs=known)
                 lifter.dispatch = True
                 lifter.far_base = 0
+                lifter.jump_tables = jt
+                res["switches"] += len(jt)
+                res["arms"] += sum(len(v) for v in jt.values())
+                if os.environ.get("NEP_DEBUG_SWITCH"):
+                    for k, x in enumerate(insns):
+                        o = x.op1
+                        if (x.mnemonic == 'jmp' and o and o.type == OpType.MEM
+                                and o.base == 'bx' and o.seg == 'cs'
+                                and x.address not in jt):
+                            t = cs * 16 + o.disp + HDR
+                            words = [int.from_bytes(data[t + q * 2:t + q * 2 + 2], 'little')
+                                     for q in range(8)]
+                            print(f"  UNRESOLVED {name} cs={cs:04X} jmp@{x.address:X} "
+                                  f"disp={o.disp:#x} fn=[{io:X},{end:X}) "
+                                  f"prev={[ (q.mnemonic, str(q.op1), str(q.op2)) for q in insns[max(0,k-4):k]]} "
+                                  f"words={[hex(w) for w in words]}")
+                res["switch_total"] += sum(
+                    1 for x in insns if x.mnemonic == 'jmp' and x.op1
+                    and x.op1.type == OpType.MEM and x.op1.base == 'bx'
+                    and x.op1.seg == 'cs')
                 lift16._CODE_SEG = f"{cs:04X}"
                 body = lifter.lift_function(name, insns, io, is_far=True)
                 body = body.replace("(CPU *cpu)\n{",
@@ -236,6 +391,8 @@ def main():
         print(f"  round {rnd + 1}: {len(new)} forced function starts (far + near)")
     bodies, all_calls, lifted = res["bodies"], res["calls"], res["lifted"]
     failed, n_wrapped, segs_used = res["failed"], res["wrapped"], res["segs"]
+    print(f"  switches: {res['switches']} resolved of {res['switch_total']} "
+          f"`jmp cs:[bx+..]` ({res['arms']} arms)")
     print(f"  forced starts total: {forced_total}; ignored out-of-code far targets: {len(ignored)}")
 
     names = [n for n, _, _ in funcs]
