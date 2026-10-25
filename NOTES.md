@@ -263,3 +263,12 @@ absent.
 - Not yet built against real SDL2 (none in the dev sandbox): the file was compile-checked against a
   hand-written header only. Windows/MinGW also needs guards for `execinfo.h` (backtraces), SIGALRM/SIGUSR1
   (watchdog) and `usleep`.
+
+## Timer (PIT) pacing
+
+- The game programs PIT channel 0 (`out 43h,36h` then divisor 0x4000 via `out 40h`) so its INT 08h ISR runs at
+  72.8 Hz, not the BIOS 18.2 Hz. `recomp_tick` fires the ISR at the programmed rate (`port_out8` tracks the
+  divisor), catching up a few missed ticks at a time. Ignoring the divisor made the intro run 4x slow.
+- The window title shows `timer N/s ticks N/s fps` (expect timer ~72/s).
+- Windows: `unsigned long` is 32-bit; the host clock is `uint64_t`. GCC 16 rejects implicit declarations, so
+  the unresolved-call stubs are declared in `recomp_all.h`.
