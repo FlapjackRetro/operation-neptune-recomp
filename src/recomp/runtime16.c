@@ -229,9 +229,28 @@ void bios_int10(CPU *cpu)
 static const char *g_keys; static int g_key_pos;
 static int g_pend = -1;                         /* key fetched by a peek, not yet consumed: (scan<<8)|ascii */
 /* next key without consuming: scripted NEP_KEYS first, then the window's queue */
+/* NEP_KEYSEQ="esc@4000,up@6000,enter@7000": named keys delivered once that many ms have passed */
+static int g_seq_left;
+static int seq_key(void)
+{
+    static const char *sp; static int init, done; static uint64_t t0;
+    if (!init) { init = 1; sp = getenv("NEP_KEYSEQ"); t0 = host_ms(); }
+    g_seq_left = (sp && *sp && !done);
+    if (!sp || !*sp || done) return -1;
+    static const struct { const char *n; int k; } K[] = { {"esc",0x011B},{"up",0x4800},{"down",0x5000},{"left",0x4B00},
+        {"right",0x4D00},{"enter",0x1C0D},{"space",0x3920},{"f1",0x3B00},{"f2",0x3C00},{"f3",0x3D00},{"tab",0x0F09} };
+    const char *at = strchr(sp, '@'); if (!at) { done = 1; return -1; }
+    if (host_ms() - t0 < (uint64_t)atol(at + 1)) return -1;
+    int k = -1; size_t n = (size_t)(at - sp);
+    for (unsigned i = 0; i < sizeof K / sizeof *K; i++) if (strlen(K[i].n) == n && !strncmp(sp, K[i].n, n)) k = K[i].k;
+    if (k < 0 && n == 1) k = (unsigned char)sp[0];
+    const char *comma = strchr(at, ','); sp = comma ? comma + 1 : "";
+    return k;
+}
 static int peek_key(void)
 {
     if (g_pend >= 0) return g_pend;
+    { int k = seq_key(); if (k >= 0) { g_pend = k; return k; } }
     if (!g_keys) { g_keys = getenv("NEP_KEYS"); if (!g_keys) g_keys = ""; }
     if (g_keys[g_key_pos]) g_pend = (unsigned char)g_keys[g_key_pos++];
     else g_pend = fe_pop_key();
@@ -244,7 +263,7 @@ void bios_int16(CPU *cpu)
     switch (cpu->ah) {
     case 0x00: case 0x10: {
         int k = peek_key();
-        while (k < 0 && fe_available()) {           /* wait for the window; the timer keeps running */
+        while (k < 0 && (fe_available() || getenv("NEP_KEYSEQ"))) {           /* wait for the window; the timer keeps running */
             recomp_tick(cpu); usleep(2000); k = peek_key();
         }
         if (k < 0) { fprintf(stderr, "[16] guest waits for a key and none is scripted; stopping\n");
