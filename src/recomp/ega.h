@@ -3,6 +3,9 @@
 #include <stdint.h>
 void    ega_set_mode(int mode, int clear);
 int     ega_graphics(void);
+void    ega_set_page(int page);
+void    ega_dac_set(int i, int r, int g, int b);
+void    ega_dac_get(int i, int *r, int *g, int *b);
 void    ega_port_out(uint16_t port, uint8_t v);
 int     ega_port_in(uint16_t port, uint8_t *v);   /* 1 = handled */
 void    ega_set_palette_reg(int idx, int val);

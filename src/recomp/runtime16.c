@@ -192,17 +192,22 @@ void dos_int21(CPU *cpu)
 
 void bios_int10(CPU *cpu)
 {
+    if (getenv("NEP_BT10")) { void *bt[10]; int n = backtrace(bt, 10); fprintf(stderr, "[10] ax=%04X from:\n", cpu->ax); backtrace_symbols_fd(bt + 1, n - 1, 2); }
     trace("[10] ax=%04X bx=%04X cx=%04X dx=%04X\n", cpu->ax, cpu->bx, cpu->cx, cpu->dx);
     switch (cpu->ah) {
     case 0x00: g_video_mode = cpu->al & 0x7F; ega_set_mode(g_video_mode, !(cpu->al & 0x80)); break;
     case 0x0F: cpu->al = g_video_mode; cpu->ah = 80; cpu->bh = 0; break;
     case 0x12: if (cpu->bl == 0x10) { cpu->bh = 0; cpu->bl = 3; cpu->cx = 0x0009; } break;   /* EGA info: 256K colour */
-    case 0x1A: cpu->al = 0; break;                                   /* no VGA */
+    case 0x1A: if (getenv("NEP_VGA")) { cpu->al = 0x1A; cpu->bl = 8; cpu->bh = 0; } else cpu->al = 0; break;   /* NEP_VGA=1 reports a VGA */
     case 0x10:                                                       /* palette */
         if (cpu->al == 0) ega_set_palette_reg(cpu->bl, cpu->bh);
         else if (cpu->al == 2) for (int i = 0; i < 16; i++) ega_set_palette_reg(i, cpu->mem[seg_off(cpu->es, (uint16_t)(cpu->dx + i))]);
+        else if (cpu->al == 0x10) ega_dac_set(cpu->bx, cpu->dh, cpu->ch, cpu->cl);
+        else if (cpu->al == 0x12) for (int i = 0; i < cpu->cx; i++) { uint32_t a = seg_off(cpu->es, (uint16_t)(cpu->dx + 3 * i));
+            ega_dac_set(cpu->bx + i, cpu->mem[a], cpu->mem[a + 1], cpu->mem[a + 2]); }
         break;
-    case 0x01: case 0x02: case 0x05: case 0x06: case 0x07: case 0x09: case 0x0A:
+    case 0x05: ega_set_page(cpu->al); break;
+    case 0x01: case 0x02: case 0x06: case 0x07: case 0x09: case 0x0A:
     case 0x0B: case 0x0C: case 0x0E: case 0x11: case 0x13: break;
     case 0x03: cpu->ax = 0; cpu->cx = 0; cpu->dx = 0; break;
     case 0x08: cpu->ax = 0x0720; break;
@@ -362,6 +367,9 @@ void recomp_tick(CPU *cpu)
 {
     g_recomp_tick_budget = 4000;
     unsigned long now = host_ms();
+    { static unsigned long next; const char *pat = getenv("NEP_FRAMES");   /* NEP_FRAMES=prefix, NEP_FRAMES_MS=interval */
+      if (pat && now >= next) { static int k; char nm[300]; const char *ms = getenv("NEP_FRAMES_MS");
+          snprintf(nm, sizeof nm, "%s%03d.ppm", pat, k++); ega_dump_ppm(nm); next = now + (ms ? (unsigned)atoi(ms) : 1000); } }
     if (g_in_isr) return;
     if (!g_next_tick) g_next_tick = now;
     if (now >= g_next_tick) {
@@ -369,6 +377,26 @@ void recomp_tick(CPU *cpu)
         if (now > g_next_tick + 1000) g_next_tick = now + 55;     /* never replay a backlog */
         run_guest_isr(cpu, 0x08);
     }
+}
+
+/* ---------- function entry census (NEP_CENSUS=file) ---------- */
+#define CENSUS_N 4096
+static struct { const char *name; unsigned long n; } g_census[CENSUS_N];
+static int g_census_on;
+void recomp_enter(const char *fn)
+{
+    if (!g_census_on) return;
+    unsigned h = (unsigned)(((uintptr_t)fn >> 3) * 2654435761u) % CENSUS_N;
+    for (int i = 0; i < CENSUS_N; i++, h = (h + 1) % CENSUS_N) {
+        if (g_census[h].name == fn) { g_census[h].n++; return; }
+        if (!g_census[h].name) { g_census[h].name = fn; g_census[h].n = 1; return; }
+    }
+}
+static void census_dump(const char *path)
+{
+    FILE *f = fopen(path, "w"); if (!f) return;
+    for (int i = 0; i < CENSUS_N; i++) if (g_census[i].name) fprintf(f, "%s %lu\n", g_census[i].name, g_census[i].n);
+    fclose(f);
 }
 
 /* ---------- running ---------- */
@@ -391,6 +419,7 @@ static void on_alarm(int sig)
             g_cpu->cs, g_cpu->ds, g_cpu->ss, g_cpu->sp, g_dos_calls);
     recomp_dump_misses("work/nep_misses.txt");
     { const char *o = getenv("NEP_FRAME"); if (o) ega_dump_ppm(o); }
+    if (getenv("NEP_TEXT")) for (int r = 0; r < 25; r++) { char ln[81]; for (int c = 0; c < 80; c++) { uint8_t ch = g_cpu->mem[0xB8000 + (r * 80 + c) * 2]; ln[c] = ch >= 32 && ch < 127 ? (char)ch : ' '; } ln[80] = 0; fprintf(stderr, "|%s\n", ln); }
     ega_stats();
     { const char *o = getenv("NEP_PLANES"); if (o) ega_dump_planes(o); }
     pthread_kill(g_run_thread, SIGUSR1);        /* backtrace from the guest thread */
@@ -401,6 +430,7 @@ static void on_alarm(int sig)
 void nep_run(CPU *cpu)
 {
     g_trace = getenv("NEP_TRACE") != NULL;
+    g_census_on = getenv("NEP_CENSUS") != NULL;
     const char *s = getenv("NEP_SECONDS");
     g_run_thread = pthread_self();
     signal(SIGUSR1, on_usr1);

@@ -15,7 +15,7 @@ if(NOT GENERATED)
 endif()
 
 add_executable(nep src/main.c src/recomp/cpu.c src/recomp/runtime16.c src/recomp/overrides.c src/recomp/ega.c ${GENERATED})
-target_compile_definitions(nep PRIVATE RECOMP_IRQ RECOMP_MEM_HOOK)
+target_compile_definitions(nep PRIVATE RECOMP_IRQ RECOMP_MEM_HOOK RECOMP_TRACE)
 target_include_directories(nep PRIVATE src/recomp gen)
 find_package(Threads REQUIRED)
 target_link_libraries(nep PRIVATE Threads::Threads m)

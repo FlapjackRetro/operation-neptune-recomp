@@ -16,9 +16,29 @@ static uint8_t gc_idx, gc[9] = { 0, 0, 0, 0, 0, 0, 0x05, 0x0F, 0xFF };
 static uint8_t crtc_idx, crtc[32];
 static uint8_t attr_idx, attr_flip, attr_pal[16] = { 0,1,2,3,4,5,0x14,7,0x38,0x39,0x3A,0x3B,0x3C,0x3D,0x3E,0x3F };
 static int g_mode = 3;
+/* VGA DAC: 256 x 6-bit RGB. Entries 0..63 start as the EGA rgbRGB table. */
+static uint8_t dac[256][3];
+static int dac_wr_idx, dac_rd_idx, dac_phase;
+static int dac_init_done;
+static void dac_init(void)
+{
+    if (dac_init_done) return; dac_init_done = 1;
+    for (int c = 0; c < 64; c++) {
+        dac[c][0] = (uint8_t)(((c >> 2 & 1) * 0x2A) + ((c >> 5 & 1) * 0x15));
+        dac[c][1] = (uint8_t)(((c >> 1 & 1) * 0x2A) + ((c >> 4 & 1) * 0x15));
+        dac[c][2] = (uint8_t)(((c & 1) * 0x2A) + ((c >> 3 & 1) * 0x15));
+    }
+}
+void ega_dac_set(int i, int r, int g, int b) { dac_init(); dac[i & 255][0] = r & 63; dac[i & 255][1] = g & 63; dac[i & 255][2] = b & 63; }
+void ega_dac_get(int i, int *r, int *g, int *b) { dac_init(); *r = dac[i & 255][0]; *g = dac[i & 255][1]; *b = dac[i & 255][2]; }
 uint16_t g_ega_start;
 
 void ega_set_palette_reg(int i, int v) { if (i >= 0 && i < 16) attr_pal[i] = (uint8_t)(v & 0x3F); }
+void ega_set_page(int page)
+{
+    int sz = g_mode == 0x0D ? 0x2000 : g_mode == 0x0E ? 0x4000 : 0x8000;
+    g_ega_start = (uint16_t)(page * sz);
+}
 int ega_graphics(void) { return g_mode >= 0x0D && g_mode <= 0x10; }
 
 void ega_set_mode(int mode, int clear)
@@ -35,6 +55,10 @@ void ega_port_out(uint16_t port, uint8_t v)
     case 0x3C0:
         if (!attr_flip) attr_idx = v & 0x1F; else if (attr_idx < 16) attr_pal[attr_idx] = v & 0x3F;
         attr_flip ^= 1; break;
+    case 0x3C7: dac_rd_idx = v; dac_phase = 0; break;
+    case 0x3C8: dac_wr_idx = v; dac_phase = 0; break;
+    case 0x3C9: dac_init(); dac[dac_wr_idx & 255][dac_phase++] = v & 63;
+                if (dac_phase == 3) { dac_phase = 0; dac_wr_idx++; } break;
     case 0x3C4: seq_idx = v & 7; break;
     case 0x3C5: if (seq_idx == 2) seq_map = v & 0x0F; break;
     case 0x3CE: gc_idx = v & 0x0F; break;
@@ -49,6 +73,8 @@ int ega_port_in(uint16_t port, uint8_t *v)
 {
     switch (port) {
     case 0x3DA: attr_flip = 0; { static uint8_t t; t ^= 0x09; *v = t; } return 1;
+    case 0x3C9: dac_init(); *v = dac[dac_rd_idx & 255][dac_phase++];
+                if (dac_phase == 3) { dac_phase = 0; dac_rd_idx++; } return 1;
     case 0x3C5: *v = seq_idx == 2 ? seq_map : 0; return 1;
     case 0x3CF: *v = gc_idx < 9 ? gc[gc_idx] : 0; return 1;
     }
@@ -127,7 +153,7 @@ int ega_dump_ppm(const char *path)
             uint16_t o = (uint16_t)(g_ega_start + y * bpl + x / 8); int bit = 7 - (x & 7);
             int c = 0;
             for (int p = 0; p < 4; p++) c |= (plane[p][o] >> bit & 1) << p;
-            uint8_t px[3]; rgb(attr_pal[c], px); fwrite(px, 1, 3, f);
+            dac_init(); uint8_t *d = dac[attr_pal[c]]; uint8_t px[3] = { (uint8_t)(d[0] * 255 / 63), (uint8_t)(d[1] * 255 / 63), (uint8_t)(d[2] * 255 / 63) }; fwrite(px, 1, 3, f);
         }
     fclose(f); return 0;
 }
