@@ -60,7 +60,7 @@ static void on_keydown(SDL_Keysym ks)
 int fe_run(void (*start_guest)(void), volatile int *guest_done)
 {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); start_guest(); return 1; }
-    SDL_Window *win = SDL_CreateWindow("Operation Neptune (recomp)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    SDL_Window *win = SDL_CreateWindow("Operation Neptune (recomp) build " __DATE__ " " __TIME__, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        960, 720, SDL_WINDOW_RESIZABLE);
     SDL_Renderer *rd = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC) : NULL;
     if (!rd) { fprintf(stderr, "SDL window: %s\n", SDL_GetError()); start_guest(); return 1; }
@@ -96,10 +96,10 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
         SDL_RenderPresent(rd);                     /* vsync paces the loop */
         frames++;
         unsigned t = SDL_GetTicks();
-        if (t - last_ms >= 1000) {                 /* diagnostics in the title bar */
+        if (t - last_ms >= 1000 || frames == 1) {  /* diagnostics in the title bar */
             char title[160]; unsigned long i = g_stat_isrs, c = g_stat_calls;
-            snprintf(title, sizeof title, "Operation Neptune (recomp) - timer %lu/s, ticks %lu/s, %u fps",
-                     i - last_isr, c - last_calls, frames);
+            snprintf(title, sizeof title, "Operation Neptune [" __TIME__ "] timer %lu/s ticks %lu/s %u fps (isr total %lu, calls %lu)",
+                     i - last_isr, c - last_calls, frames, i, c);
             SDL_SetWindowTitle(win, title); last_isr = i; last_calls = c; frames = 0; last_ms = t;
         }
     }
