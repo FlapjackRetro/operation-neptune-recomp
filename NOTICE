@@ -1,0 +1,27 @@
+Operation Neptune static recompilation - notices
+
+THE GAME
+  Operation Neptune (1991) is the copyright of The Learning Company. All rights
+  in the game, including its code, artwork, music, sound and data files
+  (ON.EXE, NEP00x.DAT, etc.), belong to its owner. "Operation Neptune" and
+  "The Learning Company" are the property of their respective owners.
+  This project is an unofficial, fan-made preservation/interoperability effort.
+  It is not affiliated with or endorsed by The Learning Company or any rights
+  holder. No game files are included in this repository; you must supply your
+  own legitimately obtained copy. The installer generates the C code locally
+  from your own ON.EXE, and that generated code is not distributed.
+
+THIRD-PARTY SOFTWARE
+  pcrecomp (https://github.com/sp00nznet/pcrecomp) - MIT, Copyright (c) 2026 sp00nz
+    The disassembler, analyzer and 16-bit lifter used to translate ON.EXE
+    (fetched by the installer, not bundled), and the CPU state code in
+    src/recomp/cpu.c / cpu.h, derived from its recomp16 runtime.
+
+  ymfm (third_party/ymfm) - BSD 3-Clause, Copyright (c) 2021, Aaron Giles
+    Yamaha OPL2 (AdLib) FM synthesis emulation. Licence: third_party/ymfm/LICENSE
+
+  SDL2 (https://libsdl.org) - zlib licence, Copyright (c) 1997-2025 Sam Lantinga
+    Window, input and audio output. Linked at build time, not bundled.
+
+  MSYS2 / MinGW-w64 / GCC / CMake / Ninja / Python - used as build tools and
+    installed by install.ps1 under their own licences; not bundled.

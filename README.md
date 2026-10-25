@@ -50,3 +50,9 @@ python tools\analyze.py
 ```
 
 No third-party Python packages are needed for the 16-bit path.
+
+## Licence and credits
+
+Original code here is MIT (see `LICENSE`). **Operation Neptune is the copyright of The Learning Company**; no game
+files are included and you must supply your own copy. Third-party credits (pcrecomp, ymfm, SDL2, build tools) are
+in `NOTICE`.
