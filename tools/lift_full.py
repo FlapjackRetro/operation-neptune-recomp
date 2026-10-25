@@ -533,7 +533,10 @@ def main():
                 # forced-start search never sees it unless collected here.
                 for ins in insns:
                     o = ins.op1
-                    if ins.mnemonic == 'jmp' and o and o.type == OpType.REL16:
+                    if ((ins.mnemonic == 'jmp' and o and o.type == OpType.REL16)
+                            or (ins.mnemonic[0] == 'j' and ins.mnemonic != 'jmp'
+                                and o and o.type in (OpType.REL8, OpType.REL16))
+                            or (ins.mnemonic.startswith('loop') and o and o.type == OpType.REL8)):
                         t = io + o.disp
                         if not (io <= t < end) and 0 <= t < code_end_img:
                             res["tail"].add(t)
@@ -603,6 +606,19 @@ def main():
     # function starts (assembly helpers have no prologue, so the analyzer
     # misses them). Far targets past the code region are data noise: ignored.
     forced_total, ignored, dbg_seen = 0, set(), set()
+    # Dispatch-miss feedback: addresses the runtime failed to dispatch (written
+    # by nep to work/nep_misses.txt) are real code the static pass never named.
+    miss_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "work", "nep_misses.txt")
+    fed = set()
+    if os.path.exists(miss_file):
+        for ln in open(miss_file):
+            ln = ln.strip()
+            if ln:
+                t = int(ln, 16)
+                if 0 < t < code_end_img and t not in known:
+                    fed.add(t)
+        print(f"  dispatch-miss feedback: {len(fed)} runtime-discovered starts from {os.path.basename(miss_file)}")
     for rnd in range(6):
         propagate_cs()
         res = lift_pass(funcs, known)
@@ -626,6 +642,9 @@ def main():
             if t not in known:
                 new.add(t)
         for t in vec_tgts:
+            if t not in known:
+                new.add(t)
+        for t in fed:
             if t not in known:
                 new.add(t)
         # Video-mode thunks: tables of one word per mode (0 = unsupported),
@@ -717,6 +736,60 @@ def main():
             f.write(f" *   fn_{io_:05X}: {why}\n")
         f.write(" */\n")
         f.write("\n#endif\n")
+
+    # Dispatch table (indirect call/jmp by address) and stubs for call targets
+    # that resolved to nothing. Image-space linear address = seg*16 + off.
+    live = sorted((io, n) for n, io, _ in funcs)
+    with open(os.path.join(OUT, "recomp_dispatch.c"), "w") as f:
+        f.write('#include "recomp_all.h"\n#include <execinfo.h>\n#include <stdio.h>\n#include <stdlib.h>\n\n')
+        f.write("typedef void (*recomp_fn)(CPU *);\n")
+        f.write("typedef struct { unsigned addr; recomp_fn fn; } DispEntry;\n")
+        f.write(f"static const DispEntry g_disp[{len(live)}] = {{\n")
+        for io_, n in live:
+            f.write(f"  {{0x{io_:05X}, {n}}},\n")
+        f.write("};\n")
+        f.write(f"#define N_DISP {len(live)}\n")
+        f.write("""
+/* in-range misses are recorded for the next lift round (dispatch feedback) */
+#define MAXMISS 4096
+static unsigned g_miss[MAXMISS]; static int g_nmiss;
+static int g_trace = -1;
+static void note_miss(unsigned addr) {
+    for (int i = 0; i < g_nmiss; i++) if (g_miss[i] == addr) return;
+    if (g_nmiss < MAXMISS) g_miss[g_nmiss++] = addr;
+}
+void recomp_dump_misses(const char *path) {
+    FILE *r = fopen(path, "r");
+    if (r) { unsigned a; while (fscanf(r, "%x", &a) == 1) note_miss(a); fclose(r); }
+    FILE *w = fopen(path, "w"); if (!w) return;
+    for (int i = 0; i < g_nmiss; i++) fprintf(w, "%05X\\n", g_miss[i]);
+    fclose(w);
+}
+/* 1 = dispatched, 0 = no function at that address */
+int recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
+    unsigned addr = ((seg << 4) + off) & 0xFFFFF;
+    int lo = 0, hi = N_DISP - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (g_disp[mid].addr == addr) { g_disp[mid].fn(cpu); return 1; }
+        if (g_disp[mid].addr < addr) lo = mid + 1; else hi = mid - 1;
+    }
+    if (g_trace < 0) g_trace = getenv("NEP_TRACE") != NULL;
+    if (addr && off < 0xFF00) note_miss(addr);   /* offsets near 0xFFFF are negative-wrapped garbage */
+    if (g_trace) {
+        fprintf(stderr, "[disp] MISS %04X:%04X (image %05X) ds=%04X; from:\\n", seg, off, addr, cpu->ds);
+        void *bt[6]; int n = backtrace(bt, 6); backtrace_symbols_fd(bt + 1, n - 1, 2);
+    }
+    return 0;
+}
+/* A miss must drop the return frame the call site pushed. */
+void dispatch_near(CPU *cpu, unsigned seg, unsigned off) { if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 2; }
+void dispatch_far(CPU *cpu, unsigned seg, unsigned off)  { if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 4; }
+""")
+        f.write("\n/* call targets the lift could not resolve: log, drop the frame */\n")
+        for st in stubs:
+            drop = 4 if st.startswith("far_") else 2
+            f.write(f'void {st}(CPU *cpu) {{ static int n; if (n++ < 4) fprintf(stderr, "[stub] {st}\\n"); cpu->sp += {drop}; }}\n')
 
     print(f"\nlifted {lifted}/{len(funcs)} functions, {len(failed)} lift errors, "
           f"{n_wrapped} wrapped near targets, {len(stubs)} unresolved call targets")

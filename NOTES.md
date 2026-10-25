@@ -192,3 +192,43 @@ have one to borrow).
   Not yet verified: the far-return convention against callers (needs the runtime).
 - Function count fell 752 -> 742: the emulator's own data/code no longer
   generates junk forced starts.
+
+## Runtime (first boot)
+
+`cmake -S . -B build && cmake --build build` builds `build/nep` from the lifted
+`gen/` plus `src/recomp/` (cpu.h/cpu.c from pcrecomp's recomp16, our
+`runtime16.c`, `ega.c`, `overrides.c`, `x87.h`). Run from the repo root:
+`build/nep <ON.EXE> <game dir>` (the folder holding NEP00n.DAT; the exe's
+`A:\TLC\ON\` paths are mapped to it case-insensitively).
+
+What exists: image loader + PSP/environment, the DOS calls the game makes
+(file I/O, memory blocks, vectors, time), BIOS INT 10h/16h/1Ah/11h/15h, port
+stubs (PIT, speaker, PIC), a timer interrupt (guest INT 08h run from
+`RECOMP_TICK`, 18.2 Hz), and a planar EGA model behind A000:0000 (write modes
+0-3, read modes 0/1, latches, bit mask, palette) through `RECOMP_MEM_HOOK`.
+
+Environment: `NEP_TRACE=1` (log DOS/BIOS calls and dispatch misses with a C
+backtrace), `NEP_SECONDS=n` (watchdog, default 20, prints the guest call
+stack), `NEP_KEYS=...` (scripted keystrokes), `NEP_FRAME=out.ppm` (dump the
+EGA screen at exit), `NEP_PLANES=out.bin` (raw planes).
+
+**Dispatch-miss feedback is live.** The runtime writes the in-code addresses it
+failed to dispatch to `work/nep_misses.txt`; `lift_full.py` reads that file and
+turns them into function starts (`tools/converge.sh` loops lift/build/run until
+it stops growing). It found the timer ISR (0x2508), 0x10B8 and a few video
+driver entry points. Offsets >= 0xFF00 are ignored as negative-wrapped garbage.
+Also fixed: conditional jumps that leave a function are now forced starts
+(the argument parser, fn_005FA, runs into 0x6B5).
+
+Status: the game runs the Turbo C startup, probes the video/sound hardware,
+sets EGA mode 0Eh, loads resources from NEP000.DAT, starts the timer, and
+reaches the main loop (fn_07FC4) and then later screens (fn_0B3A7), where it
+blocks on INT 16h. 0 crashes, 0 unhandled DOS calls.
+
+Open: the only picture drawn so far is a band of coloured stripes in the top 50
+rows (4096 bytes written with three bit-mask values), which looks like a
+hardware test pattern; no real screen has been drawn yet, so it is not yet
+clear whether the game draws through a path the hooks miss. Next: find what
+fn_0B3A7's screen draws, MPU-401/AdLib probing (port 331/388 loops time out
+cleanly), SDL2 window + real keyboard/mouse, EGA.DRV is named by the exe but
+absent.

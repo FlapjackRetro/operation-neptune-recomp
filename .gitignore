@@ -10,3 +10,7 @@ gen/
 build/
 src/gen/
 __pycache__/
+build/
+build-dbg/
+work/nep_misses.txt
+*.ppm
