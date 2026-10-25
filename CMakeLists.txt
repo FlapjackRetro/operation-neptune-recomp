@@ -5,7 +5,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 if(NOT MSVC)
-  add_compile_options(-w -fno-strict-aliasing)   # generated code is warning-noisy
+  add_compile_options(-w -fno-strict-aliasing -Werror=implicit-function-declaration)   # generated code is warning-noisy
 endif()
 
 # gen/ is written by tools/lift_full.py (git-ignored)

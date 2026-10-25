@@ -799,6 +799,8 @@ def main():
         f.write("\n")
         for n in names:
             f.write(f"void {n}(CPU *cpu);\n")
+        for st in stubs:                      # unresolved-call stubs (defined in recomp_dispatch.c)
+            f.write(f"void {st}(CPU *cpu);\n")
         f.write("\n/* native overrides (implement in the runtime):\n")
         for io_, why in sorted(OVERRIDES.items()):
             f.write(f" *   fn_{io_:05X}: {why}\n")
