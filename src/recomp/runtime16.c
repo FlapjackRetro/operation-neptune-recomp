@@ -155,6 +155,7 @@ void dos_int21(CPU *cpu)
         if (cpu->bx >= MAX_FILES || !g_files[cpu->bx]) { dos_fail(cpu, 6); break; }
         uint32_t a = seg_off(cpu->ds, cpu->dx);
         size_t n = fread(&cpu->mem[a], 1, cpu->cx, g_files[cpu->bx]);
+        if (n != cpu->cx) fprintf(stderr, "[21] SHORT READ h=%u want=%u got=%zu\n", cpu->bx, cpu->cx, n);
         cpu->ax = (uint16_t)n; dos_ok(cpu); break; }
     case 0x40: {
         uint32_t a = seg_off(cpu->ds, cpu->dx);
@@ -164,7 +165,7 @@ void dos_int21(CPU *cpu)
     case 0x41: dos_fail(cpu, 2); break;
     case 0x42: {
         if (cpu->bx >= MAX_FILES || !g_files[cpu->bx]) { dos_fail(cpu, 6); break; }
-        long off = (long)(((uint32_t)cpu->cx << 16) | cpu->dx);
+        long off = (long)(int32_t)(((uint32_t)cpu->cx << 16) | cpu->dx);
         fseek(g_files[cpu->bx], off, cpu->al == 0 ? SEEK_SET : cpu->al == 1 ? SEEK_CUR : SEEK_END);
         long p = ftell(g_files[cpu->bx]);
         cpu->dx = (uint16_t)(p >> 16); cpu->ax = (uint16_t)p; dos_ok(cpu); break; }
@@ -421,10 +422,20 @@ static void run_guest_isr(CPU *cpu, int vec)
 }
 
 volatile unsigned long g_stat_isrs, g_stat_calls;   /* read by the window for its title */
+static uint16_t mem_r16(CPU *c, unsigned o) { uint32_t a = ((uint32_t)0x2343 << 4) + o; return (uint16_t)(c->mem[a] | (c->mem[a+1] << 8)); }
+__attribute__((noinline)) void nep_watch_hook(uint8_t *p) { __asm__ volatile("" :: "r"(p) : "memory"); }   /* gdb breakpoint target */
 void recomp_tick(CPU *cpu)
 {
     g_recomp_tick_budget = 4000;
     uint64_t now = host_ms();
+    static int spbt = -1, splog = -1, watch_ms = -2;
+    { static uint64_t t0; static int fired;
+      if (watch_ms == -2) watch_ms = getenv("NEP_WATCH_MS") ? atoi(getenv("NEP_WATCH_MS")) : -1;
+      if (!t0) t0 = now;
+      if (watch_ms >= 0 && !fired && now - t0 >= (uint64_t)watch_ms) { fired = 1; nep_watch_hook((uint8_t *)&cpu->sp); } }
+    if (spbt < 0) { spbt = getenv("NEP_SPBT") ? atoi(getenv("NEP_SPBT")) : 0; splog = getenv("NEP_SPLOG") != NULL; }
+    if (spbt) { static int done; if (!done && cpu->sp < (unsigned)spbt) { done = 1; void *bt[24]; int n = backtrace(bt, 24); fprintf(stderr, "[spbt] sp=%04X\n", cpu->sp); backtrace_symbols_fd(bt, n, 2); } }
+    if (splog) { static uint64_t nx; if (now >= nx) { nx = now + 500; fprintf(stderr, "[sp] ss:sp=%04X:%04X ds=%04X cnt=%04X%04X tgt=%04X%04X IF=%d isrs=%lu\n", cpu->ss, cpu->sp, cpu->ds, mem_r16(cpu,0xA0), mem_r16(cpu,0x9E), mem_r16(cpu,0x3F5E), mem_r16(cpu,0x3F5C), !!(cpu->flags&FLAG_IF), (unsigned long)g_stat_isrs); } }
     if (fe_available()) {
         static unsigned long next_present;
         if (fe_quit_requested()) { cpu->halted = 1; longjmp(g_exit_jmp, 3); }
@@ -471,6 +482,11 @@ void recomp_enter(const char *fn)
             for (int i = 1; i <= 8; i++) fprintf(stderr, " %s", ring[(rp - i + 48) % 24] ? ring[(rp - i + 48) % 24] : "-");
             fprintf(stderr, "\n"); last_ds = g_cpu->ds; if (++fired > 40) dbg = 0; }
     }
+    { static int sw = -1; static const char *rn[40]; static uint16_t rs[40]; static int rpp, shown;
+      if (sw < 0) sw = getenv("NEP_SPWATCH") ? atoi(getenv("NEP_SPWATCH")) : 0; if (getenv("NEP_BPWATCH")) sw = -1;
+      if (sw && g_cpu && shown < 3) { rn[rpp % 40] = fn; rs[rpp % 40] = g_cpu->bp; rpp++;
+        if ((sw > 0 ? g_cpu->sp < sw : (g_cpu->bp == 0 && rpp > 5000)) ) { shown++; fprintf(stderr, "[spw] sp=%04X bp=%04X; stack words:", g_cpu->sp, g_cpu->bp); for (int w = 0; w < 12; w++) fprintf(stderr, " %04X", (unsigned)(g_cpu->mem[((uint32_t)g_cpu->ss<<4)+(uint16_t)(g_cpu->sp+2*w)] | (g_cpu->mem[((uint32_t)g_cpu->ss<<4)+(uint16_t)(g_cpu->sp+2*w+1)]<<8))); fprintf(stderr, "\n"); { void *bt[16]; int n = backtrace(bt, 16); backtrace_symbols_fd(bt, n, 2); } fprintf(stderr, " recent entries (oldest first):\n");
+          for (int i = 40; i >= 1; i--) { int k = (rpp - i + 400) % 40; if (rn[k]) fprintf(stderr, "   %s sp=%04X\n", rn[k], rs[k]); } } } }
     if (!g_census_on) return;
     unsigned h = (unsigned)(((uintptr_t)fn >> 3) * 2654435761u) % CENSUS_N;
     for (int i = 0; i < CENSUS_N; i++, h = (h + 1) % CENSUS_N) {

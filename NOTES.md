@@ -283,3 +283,23 @@ absent.
   faster than ISA I/O, so each status read advances a 3 us virtual clock (otherwise detection fails and
   there is no music).
 - The game also probes port 0x331 (MPU-401); no MIDI output is implemented.
+
+## Backward-branch wrap bug (capsule-exit animation)
+
+The decoder masks relative branch targets to 16 bits (`WRAP_NEAR_TARGETS`).
+For a function split out of a larger routine, a *backward* `loop`/`jcc`/`jcxz`/short `jmp`
+that leaves the function therefore arrived as e.g. `0xFFD7` and the lifter turned it
+into `func_start + 0xFFD7` -- 0x10000 too high.  `tools/lift_full.py` already
+wrap-corrected `call`/`jmp rel16`, but not the other branch kinds.  In the object
+loop at 09D4:0118 (`loop 0x9E58`) that became a tail call into `fn_19E58` (the C
+runtime's number formatter), which trashed the stack (SP fell from ~0xFC0 to 0x65)
+and corrupted the Expert scene right after the sub left the capsule.  All relative
+branch kinds are wrap-corrected now (970 targets vs 6xx before).
+
+Also fixed: the timer ISR's `pushf; call far <BIOS iret stub F000:FF53>` chain leaked
+the flags word on every tick (the iret stub pops ip, cs *and* flags), and
+`INT 21h/42h` treated the 32-bit offset as unsigned (SEEK_CUR with negative offsets).
+
+Debug aids (env, off by default): `NEP_SPLOG` (ss:sp + tick counter every 500 ms),
+`NEP_SPBT=<sp>` (backtrace first time SP drops below value), `NEP_SPWATCH=<sp>`
+(function-entry ring when SP drops below value), `NEP_WATCH_MS` (gdb hook).

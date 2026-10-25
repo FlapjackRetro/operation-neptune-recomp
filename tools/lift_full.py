@@ -562,7 +562,14 @@ def main():
                 base = cs * 16
                 for ins in insns:             # wrap-correct near call/jmp targets
                     o = ins.op1
-                    if ins.mnemonic in ("call", "jmp") and o and o.type == OpType.REL16:
+                    if (o and o.type in (OpType.REL8, OpType.REL16)
+                            and (ins.mnemonic in ("call", "jmp", "jcxz")
+                                 or ins.mnemonic.startswith("loop")
+                                 or (ins.mnemonic[0] == "j" and ins.mnemonic != "jmp"))):
+                        # The decoder masks a backward branch below the function
+                        # start to 16 bits (0xFFD7); undo that for every relative
+                        # branch kind, not only call/jmp rel16 -- else a backward
+                        # `loop`/`jcc` out of a split function lands 0x10000 high.
                         t = base + ((io - base + o.disp) & 0xFFFF)
                         if t != io + o.disp:
                             o.disp = t - io
@@ -869,7 +876,7 @@ int recomp_dispatch(CPU *cpu, unsigned seg, unsigned off) {
 }
 /* A miss must drop the return frame the call site pushed. */
 void dispatch_near(CPU *cpu, unsigned seg, unsigned off) { if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 2; }
-void dispatch_far(CPU *cpu, unsigned seg, unsigned off)  { if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 4; }
+void dispatch_far(CPU *cpu, unsigned seg, unsigned off)  { if (seg == 0xF000 && off == 0xFF53) { cpu->sp += 6; return; } /* BIOS ROM iret: pops ip,cs,flags */ if (!recomp_dispatch(cpu, seg, off)) cpu->sp += 4; }
 """)
         f.write("\n/* call targets the lift could not resolve: log, drop the frame */\n")
         for st in stubs:
