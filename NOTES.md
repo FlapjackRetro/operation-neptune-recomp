@@ -34,49 +34,70 @@
 - 726 near call/jmp targets needed wrap correction.
 - Forced function starts: unresolved far and near call targets that land in the
   code region become functions (analyzer misses prologue-less assembly helpers).
-  After the jump-table work below: **777 functions lifted, 0 lift errors**,
-  138 forced starts over 2 rounds, 17 unresolved targets (all outside the code
-  region: data decoded as code, ignored).
+  One round adds 98. Result: **737 functions lifted, 0 lift errors**, 7
+  unresolved targets, all outside the code region (data decoded as code,
+  ignored).
 - Caveat: forced starts are not validated against a prologue/instruction
   boundary check (dinopark's `valid_boundary`), so some may be mid-function
-  targets. They overlap existing functions, which the lifter tolerates, but
-  audit the list once the boot runs. Overlap also means switch counts below
-  include duplicates.
+  targets. They overlap existing functions, which the lifter tolerates; audit the
+  list once the boot runs. Overlap also means switch counts below include
+  duplicates.
 - Far-call targets show 123 distinct segment values; the real ones are few
   (0, 145, 586, 605, 641, 793, ...). The rest (e.g. 34840, 65535) are noise.
 
-## Jump tables (`jump_tables` in tools/lift_full.py)
+## Jump tables (`jump_tables` / `decode_func` in tools/lift_full.py)
 
 ON.EXE has ~67 distinct `jmp word cs:[bx+table]` Borland switches (plus 7
 `jmp cs:[bp+..]`, 5 `call cs:[bx+..]`, not handled).
 
 - Table address is CS*16 + disp, so a wrong segment-map guess reads junk. Where
-  a switch fails under the guessed CS, `jump_tables(infer=True)` tries every
-  paragraph base within 64K below the function; if exactly one base gives a
-  table of the right length (the `cmp bx,N` bound) it is taken as the real CS
-  and overrides the segment map for that function (8 functions on the first
-  pass). Applied before lifting, so wrap fixing, `SEG_xxxx` and `push cs` see it.
+  a switch fails under the guessed CS, candidate bases (paragraphs up to 64K
+  below the function) are tried. A base counts if its table has the right
+  length (the `cmp` bound, else a run of >= 3 arms) with every arm inside the
+  function, and the table sits right after the `jmp` (<= 8 bytes), or, as a
+  fallback for dense switches with an exact `cmp` bound, anywhere in the
+  function (tables parked at the end of the routine). One function has one CS,
+  so candidates are intersected across all its failing switches; a unique
+  survivor overrides the segment map. 7 functions overridden. Applied before
+  lifting so wrap fixing, `SEG_xxxx` and `push cs` see it.
+- Bound semantics: `cmp bx,N` counts cases only if a `shl bx,1` follows it; with
+  no shl, bx is already a byte offset and the table has N/2+1 words
+  (fn_01D8C/fn_021E4 tile blitters).
+- Sparse shape (`mov cx,N` / `mov bx,list` / loop / `jmp cs:[bx+2N]`): the value
+  list (here ASCII command letters in fn_04378) sits right after the jmp and
+  the arms follow it. These need the placement rule above: a list of small
+  values plus almost any base lands inside the function.
 - Tables sit in the code stream, so the linear decode desyncs through them.
-  Arms are range-checked against the function, then the function is re-decoded
-  skipping the table bytes, and arms that still miss an instruction boundary
-  are dropped.
-- Result: **50 of 76** switch sites resolved (731 arms), including duplicates
-  from overlapping functions. 26 remain unresolved and fall back to runtime
-  dispatch (`NEP_DEBUG_SWITCH=1` prints each with its CS, bound and table words).
-  They fall into two groups:
-  1. Video-mode dispatch (`mov bl, ds:[0x588F]` / `shl bx,1` / `jmp cs:[bx+0x3C]`
-     in the 0x8EC-0xBB7 routine). With CS=0x91 the table words look right
-     (0x1A1, 0x258, 0x294, 0x2A7 -> 0xAB1, 0xB68, 0xBA4, 0xBB7) but arms leave the
-     analyzer's function bounds and some entries are 0. This is one routine the
-     analyzer split at `retf`s; needs the real function extent.
-  2. The sparse shape (`inc bx / inc bx / loop / jmp default` then
-     `jmp cs:[bx+N]`): in fn_04378, fn_10827, fn_1D5EF and others the `mov cx`/
-     `mov bx` setup is not matching, so the table lands on junk. Needs a look at
-     the actual setup sequence.
+  Each function is decoded, tables located, then re-decoded skipping the table
+  bytes. **The decoder's `address` and relative-branch `disp` are relative to the
+  buffer it is given, not to `base_offset`, so each re-decoded piece is
+  re-expressed against the function start.** (A first version of this pass did
+  not; it left jumps in every piece after the first pointing at the wrong
+  place and inflated the forced-start count from 98 to 138. Fixed.)
+- Result: **60 of 72** switch sites resolved (793 arms; duplicates from
+  overlapping functions included). 12 sites remain, ~9 distinct, falling back to
+  runtime dispatch (`NEP_DEBUG_SWITCH=1` lists them with CS, bound and table
+  words, `NEP_DEBUG_INFER=1` shows the candidate bases):
+  1. Video-mode thunks (fn_008EC / fn_00946 / fn_00AB1: `mov bl, ds:[0x588F]` /
+     `shl bx,1` / `jmp cs:[bx+0x3C]`). These are not switches inside a function:
+     module 0x910 (CS=0x91) is a video driver and each entry point tail-jumps
+     through a per-mode table at 0x94C to the mode-specific routine
+     (words 0, 0x1A1, 0, 0x258, 0x294, 0, 0x2A7, 0 -> 0xAB1, 0xB68, 0xBA4,
+     0xBB7; zero = unsupported mode). The arms are other functions, so the
+     lifter's generic `recomp_dispatch(cpu, cs, target)` is the right output,
+     but it needs the right CS (the segment map gives fn_008EC and fn_00AB1 CS=0)
+     and the targets (0xB68, 0xBA4 are entries inside fn_00AB1's analyzer
+     range) to exist as functions. Left to the dispatch-miss loop.
+  2. fn_021E4: a copy of fn_01D8C's tile blitter with a single switch, so two
+     adjacent bases tie. Needs a tiebreaker (e.g. the matching table in the
+     other copy).
+  3. fn_1FDCB (and its overlapping fn_201D6): 5 switches with no `cmp` bound
+     (`mov bh,0 / shl bx,1 / jmp cs:[bx+0x2007]`, an unbounded dispatch on a
+     byte), tables not after the jmp. Needs a table-length heuristic.
 
 ## Not done yet
 
-- The 26 unresolved switches above; `jmp cs:[bp+..]` and `call cs:[bx+..]` forms.
+- The ~9 distinct unresolved switches above; `jmp cs:[bp+..]` and `call cs:[bx+..]` forms.
 - Borland `_INIT_` table, CRT overrides.
 - Validate forced starts; filter noisy segments in the segment map.
 - `runtime/recomp16` host (DOS/BIOS/EGA on SDL2) and the CMake build.

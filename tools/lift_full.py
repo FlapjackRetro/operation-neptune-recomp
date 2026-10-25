@@ -127,7 +127,7 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
     Returns ({jmp instruction address: [absolute arm addresses]}, [inferred
     segment values], [(table start, table end) image offsets]).
     """
-    out, inferred, tabs = {}, [], []
+    out, inferred, tabs, pending = {}, [], [], []
 
     def arms_at(base, ins, o, bx_imm, cx_imm, bound):
         if bx_imm is not None and cx_imm and o.disp == cx_imm * 2:
@@ -156,13 +156,21 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
         if o.base != 'bx' or o.seg != 'cs':
             continue
         bound = bx_imm = cx_imm = None
-        for j in insns[max(0, idx - 16):idx]:
+        window = insns[max(0, idx - 16):idx]
+        for wi, j in enumerate(window):
             if not (j.op1 and j.op1.type == OpType.REG16 and j.op2
                     and j.op2.type in (OpType.IMM8, OpType.IMM16)):
                 continue
             reg = repr(j.op1)
             if j.mnemonic == 'cmp':
-                bound = j.op2.disp + 1
+                # `cmp bx,N` before a `shl bx,1` counts cases; with no shl
+                # between it and the jmp, bx is already a byte offset into the
+                # word table, so N bytes is N/2 entries (+1: the compiler's
+                # jge/ja leaves one spare).
+                doubled = any(k.mnemonic == 'shl' and k.op1 and repr(k.op1) in ('bx', 'ax')
+                              and k.op2 and k.op2.type == OpType.IMM8 and k.op2.disp == 1
+                              for k in window[wi + 1:])
+                bound = j.op2.disp + 1 if doubled else j.op2.disp // 2 + 1
             elif j.mnemonic == 'mov' and reg == 'bx':
                 bx_imm = j.op2.disp
             elif j.mnemonic == 'mov' and reg == 'cx':
@@ -174,16 +182,38 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
             continue
         if not infer or io is None:
             continue
-        found = {}
-        lo = max(0, (io - 0xFFF0) & ~0xF)
-        for base in range(lo, io + 1, 16):
+        strict, loose = {}, {}
+        lo_b = max(0, (io - 0xFFF0) & ~0xF)
+        for base in range(lo_b, io + 1, 16):
             got = arms_at(base, ins, o, bx_imm, cx_imm, bound)
-            if got:
-                found[base] = got
-        if len(found) == 1:
-            (base, got), = found.items()
-            out[ins.address] = got[0]
-            tabs.append(got[1])
+            if not got:
+                continue
+            # Borland lays the table (or the sparse value list) right after the
+            # jmp. Without this the wrong bases pass: a list of small values
+            # plus almost any base lands inside the function.
+            if 0 <= got[1][0] - (ins.offset + ins.length) <= 8:
+                strict[base] = got
+            # Fallback for a table parked at the end of the function: allow it
+            # anywhere in the function, but only for a dense switch whose `cmp`
+            # fixed the length exactly.
+            elif bound and cx_imm is None and lo <= got[1][0] < hi:
+                loose[base] = got
+        found = strict if strict else loose
+        if os.environ.get('NEP_DEBUG_INFER'):
+            print(f'  INFER fn@{io:X} jmp@{ins.address:X}: bound={bound} cx={cx_imm} strict={[hex(b) for b in strict]} loose={[hex(b) for b in loose]}')
+        pending.append((ins, found))
+    # One function has one CS: intersect the candidate bases of every switch
+    # that failed under the guessed CS. (Adjacent tables or repeated pairs make
+    # a neighbouring base look valid for one switch, never for all of them.)
+    sets = [set(f) for _, f in pending if f]
+    if sets:
+        common = set.intersection(*sets)
+        if len(common) == 1:
+            base, = common
+            for ins_, f in pending:
+                if base in f:
+                    out[ins_.address] = f[base][0]
+                    tabs.append(f[base][1])
             inferred.append(base >> 4)
     return out, inferred, tabs
 
@@ -276,7 +306,18 @@ def main():
             insns = []
             for a_, b_ in cuts:
                 if b_ > a_:
-                    insns += Decoder(data[a_ + HDR:b_ + HDR], base_offset=a_).decode_all()
+                    piece = Decoder(data[a_ + HDR:b_ + HDR], base_offset=a_).decode_all()
+                    # The decoder's `address` and relative-branch `disp` are
+                    # relative to the buffer it was given, not to base_offset.
+                    # Re-express both against the function start so every piece
+                    # agrees with the first one.
+                    shift = a_ - io
+                    for x in piece:
+                        x.address = x.offset - io
+                        o = x.op1
+                        if shift and o and o.type in (OpType.REL8, OpType.REL16):
+                            o.disp += shift
+                    insns += piece
             offs = {x.offset for x in insns}
             jt = {k: v for k, v in jt.items() if all(t in offs for t in v)}
         return insns, jt, inf
