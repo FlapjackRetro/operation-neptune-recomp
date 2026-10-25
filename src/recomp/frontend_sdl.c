@@ -1,6 +1,7 @@
 /* SDL2 front end: window with the guest's screen, keyboard -> BIOS key queue. */
 #include "frontend.h"
 #include "runtime16.h"
+#include "audio.h"
 #include <SDL.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -11,6 +12,7 @@ static int g_kq[KQ]; static volatile unsigned g_kr, g_kw;     /* single producer
 static pthread_mutex_t g_fm = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t g_frame[640 * 350 * 3]; static int g_fw, g_fh; static volatile int g_fnew;
 static volatile int g_quit;
+static int g_audio_rate = 48000;
 
 int  fe_available(void) { return 1; }
 int  fe_quit_requested(void) { return g_quit; }
@@ -57,9 +59,15 @@ static void on_keydown(SDL_Keysym ks)
         fe_push_key((scan_of_ascii((int)ks.sym) << 8) | (int)(ks.sym - SDLK_a + 1));
 }
 
+static void audio_cb(void *ud, Uint8 *stream, int len)
+{
+    (void)ud;
+    audio_render((int16_t *)stream, len / 4, g_audio_rate);
+}
+
 int fe_run(void (*start_guest)(void), volatile int *guest_done)
 {
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); start_guest(); return 1; }
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); start_guest(); return 1; }
     SDL_Window *win = SDL_CreateWindow("Operation Neptune (recomp) build " __DATE__ " " __TIME__, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        960, 720, SDL_WINDOW_RESIZABLE);
     SDL_Renderer *rd = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC) : NULL;
@@ -67,6 +75,14 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
     SDL_RenderSetLogicalSize(rd, 640, 480);       /* 4:3 letterbox: DOS pixels are not square */
     SDL_StartTextInput();
+    SDL_AudioDeviceID adev = 0;
+    {   /* AdLib + PC speaker mix; the callback pulls from audio.cpp. Failure just means no sound. */
+        SDL_AudioSpec want, have; SDL_zero(want);
+        want.freq = 48000; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024; want.callback = audio_cb;
+        adev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+        if (adev) { g_audio_rate = have.freq; SDL_PauseAudioDevice(adev, 0); }
+        else fprintf(stderr, "SDL audio: %s (continuing without sound)\n", SDL_GetError());
+    }
     SDL_Texture *tex = NULL; int tw = 0, th = 0;
     start_guest();                                 /* spawns the guest thread */
     unsigned last_ms = SDL_GetTicks(), frames = 0; unsigned long last_isr = 0, last_calls = 0;
@@ -105,6 +121,7 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
         }
     }
     if (tex) SDL_DestroyTexture(tex);
+    if (adev) SDL_CloseAudioDevice(adev);
     SDL_DestroyRenderer(rd); SDL_DestroyWindow(win); SDL_Quit();
     return 0;
 }

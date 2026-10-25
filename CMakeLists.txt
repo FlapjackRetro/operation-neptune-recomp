@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
-project(OperationNeptuneRecomp C)
+project(OperationNeptuneRecomp C CXX)
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 if(NOT MSVC)
-  add_compile_options(-w -fno-strict-aliasing -Werror=implicit-function-declaration)   # generated code is warning-noisy
+  add_compile_options(-w -fno-strict-aliasing "$<$<COMPILE_LANGUAGE:C>:-Werror=implicit-function-declaration>")   # generated code is warning-noisy
 endif()
 
 # gen/ is written by tools/lift_full.py (git-ignored)
@@ -14,7 +15,9 @@ if(NOT GENERATED)
   message(FATAL_ERROR "gen/ is empty: run tools/lift_full.py first")
 endif()
 
-add_executable(nep src/main.c src/recomp/cpu.c src/recomp/runtime16.c src/recomp/overrides.c src/recomp/ega.c ${GENERATED})
+add_executable(nep src/main.c src/recomp/cpu.c src/recomp/runtime16.c src/recomp/overrides.c src/recomp/ega.c src/recomp/audio.cpp
+  third_party/ymfm/ymfm_opl.cpp third_party/ymfm/ymfm_adpcm.cpp third_party/ymfm/ymfm_pcm.cpp ${GENERATED})
+target_include_directories(nep PRIVATE third_party/ymfm)
 # Optional window + keyboard (SDL2). -DNEP_SDL=OFF forces the headless build.
 option(NEP_SDL "Build the SDL2 front end when SDL2 is found" ON)
 if(NEP_SDL)
@@ -37,6 +40,9 @@ target_compile_definitions(nep PRIVATE RECOMP_IRQ RECOMP_MEM_HOOK RECOMP_TRACE)
 target_include_directories(nep PRIVATE src/recomp gen)
 find_package(Threads REQUIRED)
 target_link_libraries(nep PRIVATE Threads::Threads m)
+if(NOT MSVC)
+  set_source_files_properties(src/recomp/audio.cpp PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 set_target_properties(nep PROPERTIES ENABLE_EXPORTS ON)   # symbol names in watchdog backtraces
 
 enable_testing()

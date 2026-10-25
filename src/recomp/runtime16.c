@@ -15,6 +15,7 @@
 #include "x87.h"
 #include "ega.h"
 #include "frontend.h"
+#include "audio.h"
 #include <ctype.h>
 #include <math.h>
 #include <dirent.h>
@@ -299,7 +300,7 @@ volatile unsigned g_stat_pit_div = 65536;
 uint8_t port_in8(CPU *cpu, uint16_t port)
 {
     (void)cpu;
-    { uint8_t v; if (ega_port_in(port, &v)) return v; }
+    { uint8_t v; if (ega_port_in(port, &v)) return v; if (audio_port_in(port, &v)) return v; }
     switch (port) {
     case 0x61:  g_port61 ^= 0x10; return g_port61;                   /* refresh bit toggles */
     case 0x40: {                                                     /* down-counter, low then high byte */
@@ -315,10 +316,11 @@ uint8_t port_in8(CPU *cpu, uint16_t port)
 void port_out8(CPU *cpu, uint16_t port, uint8_t val)
 {
     (void)cpu;
+    if (audio_port_out(port, val)) return;                           /* AdLib, PIT channel 2 */
     if ((port >= 0x3C0 && port <= 0x3CF) || port == 0x3D4 || port == 0x3D5) ega_port_out(port, val);
     else if (port == 0x43) { if ((val >> 6) == 0 && ((val >> 4) & 3) == 3) { g_pit_ctl_ch0 = 1; g_pit_phase = 0; } else if ((val >> 6) == 0) g_pit_ctl_ch0 = 0; }
     else if (port == 0x40) { if (g_pit_ctl_ch0) { pit_write_ch0(val); g_stat_pit_div = g_pit_div; } }
-    else if (port == 0x61) g_port61 = (uint8_t)((g_port61 & 0x10) | (val & ~0x10));
+    else if (port == 0x61) { g_port61 = (uint8_t)((g_port61 & 0x10) | (val & ~0x10)); audio_set_port61(val); }
     else trace("[out %03X] = %02X\n", port, val);
 }
 uint16_t port_in16(CPU *cpu, uint16_t port) { return (uint16_t)(port_in8(cpu, port) | (port_in8(cpu, (uint16_t)(port + 1)) << 8)); }
@@ -328,7 +330,7 @@ void port_out16(CPU *cpu, uint16_t port, uint16_t v) { port_out8(cpu, port, (uin
 
 int nep_load_image(CPU *cpu, const char *path)
 {
-    g_cpu = cpu; g_vga_mem = cpu->mem;
+    g_cpu = cpu; g_vga_mem = cpu->mem; audio_init();
     for (int v = 0; v < 256; v++) { g_vec_seg[v] = BIOS_SEG; g_vec_off[v] = BIOS_IRET; }
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return -1; }
@@ -416,6 +418,7 @@ void recomp_tick(CPU *cpu)
     { static unsigned long next; const char *pat = getenv("NEP_FRAMES");   /* NEP_FRAMES=prefix, NEP_FRAMES_MS=interval */
       if (pat && now >= next) { static int k; char nm[300]; const char *ms = getenv("NEP_FRAMES_MS");
           snprintf(nm, sizeof nm, "%s%03d.ppm", pat, k++); ega_dump_ppm(nm); next = now + (ms ? (unsigned)atoi(ms) : 1000); } }
+    audio_wav_feed();
     if (g_in_isr) return;
     /* PIT channel 0 at its default rate: 1193182 / 65536 = 18.2065 Hz (54.9254 ms). The ISR can only run
      * here, so when the guest spends a long time between loop back-edges ticks arrive late; run the
@@ -480,6 +483,7 @@ static void on_usr1(int sig)
 #endif
 static void watchdog_report(void)
 {
+    audio_wav_close();
     fprintf(stderr, "\n[watchdog] time limit reached: cs=%04X ds=%04X ss:sp=%04X:%04X, %u DOS calls\n",
             g_cpu->cs, g_cpu->ds, g_cpu->ss, g_cpu->sp, g_dos_calls);
     recomp_dump_misses("work/nep_misses.txt");
@@ -516,8 +520,10 @@ void nep_run(CPU *cpu)
 #else
     if (wd) { pthread_t t; g_wd_seconds = wd; pthread_create(&t, NULL, wd_thread, NULL); }
 #endif
+    { const char *w = getenv("NEP_WAV"); if (w) audio_wav_open(w, 44100); }
     cpu->flags |= FLAG_IF;
     if (setjmp(g_exit_jmp) == 0) fn_00000(cpu);
+    audio_wav_close();
     recomp_dump_misses("work/nep_misses.txt");
     { const char *o = getenv("NEP_FRAME"); if (o) ega_dump_ppm(o); }
     fprintf(stderr, "[exit] code %d after %u DOS calls\n", nep_exit_code, g_dos_calls);

@@ -272,3 +272,14 @@ absent.
 - The window title shows `timer N/s ticks N/s fps` (expect timer ~72/s).
 - Windows: `unsigned long` is 32-bit; the host clock is `uint64_t`. GCC 16 rejects implicit declarations, so
   the unresolved-call stubs are declared in `recomp_all.h`.
+
+## Audio
+
+- `src/recomp/audio.cpp` (C API in `audio.h`): AdLib = ymfm YM3812 (vendored in `third_party/ymfm`, BSD-3) on
+  ports 388/389, PC speaker = PIT channel 2 (ports 42/43) gated by port 61 bits 0-1 as a square wave.
+  The SDL audio callback pulls `audio_render()`; `NEP_WAV=file` writes a headless WAV (44.1 kHz) for checks;
+  `NEP_AUDIOLOG=1` logs OPL register writes.
+- AdLib detection reads the status port ~100x to wait out the 80 us timer. Recompiled code does that far
+  faster than ISA I/O, so each status read advances a 3 us virtual clock (otherwise detection fails and
+  there is no music).
+- The game also probes port 0x331 (MPU-401); no MIDI output is implemented.
