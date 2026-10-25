@@ -331,3 +331,8 @@ category read as 0 (Combination Lock).
 
 Debug hooks added (env-gated): NEP_WATCHSS=<hex ss offset>, NEP_WATCHBP=<hex bp threshold>,
 `[ew-words]` line in NEP_ENTERWATCH.
+
+## PC speaker only
+`NEP_AUDIO=speaker` hides the AdLib (status port reads 0xFF, OPL writes dropped) so the game's
+detection fails and it falls back to the PC speaker. Verified headless: zero OPL writes, speaker
+audio present. Default (unset) is AdLib.

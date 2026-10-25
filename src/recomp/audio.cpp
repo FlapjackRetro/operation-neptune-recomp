@@ -89,11 +89,19 @@ void render_locked(int16_t *out, int frames, int rate)
 
 extern "C" {
 
+static int speaker_only(void)      // NEP_AUDIO=speaker: hide the AdLib so the game falls back to the PC speaker
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("NEP_AUDIO"); v = e && (e[0] == 's' || e[0] == 'S' || e[0] == 'p' || e[0] == 'P'); }
+    return v;
+}
+
 void audio_init(void) { if (!g) g = new Audio(); }
 
 int audio_port_out(uint16_t port, uint8_t v)
 {
     if (!g) return 0;
+    if (speaker_only() && (port == 0x388 || port == 0x389)) return 1;      // no AdLib present
     std::lock_guard<std::mutex> l(g->mu);
     switch (port) {
     case 0x388: { static int lg = -1; if (lg < 0) lg = getenv("NEP_AUDIOLOG") != NULL; if (lg) fprintf(stderr, "[opl] addr %02X\n", v); } g->opl_addr = v; g->chip.write_address(v); return 1;
@@ -113,6 +121,7 @@ int audio_port_out(uint16_t port, uint8_t v)
 int audio_port_in(uint16_t port, uint8_t *v)
 {
     if (!g) return 0;
+    if (port == 0x388 && speaker_only()) { *v = 0xFF; return 1; }          // floating bus: detection fails
     if (port == 0x388) {
         std::lock_guard<std::mutex> l(g->mu);
         g_skew_us += 3.0;
