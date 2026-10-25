@@ -17,7 +17,7 @@ What this does:
 NOT done yet (dinopark needed all of these; expect to add them as the boot
 bring-up hits them):
   * jump tables / switch arms (cs:[bx+table])
-  * Borland _INIT_ table entries (init_list_targets)
+  * (Borland _INIT_ table: not present in ON.EXE; startup hook vectors handled)
   * native overrides of CRT routines, compiled-blit patching
   * runtime/recomp16 host (DOS/BIOS/EGA) and the CMake build
   * dispatch-miss feedback loop
@@ -306,6 +306,30 @@ def main():
     except Exception:
         pass
 
+    # Turbo C 2.0 startup hooks: `push cs / call word ds:[vec]` where the
+    # vector (_cleanup / _checknull / _restorezero) is a near pointer into the
+    # startup segment, initialised in DGROUP. No TC++-style _INIT_ table exists
+    # in ON.EXE; these vectors are its only data-referenced code pointers.
+    n_vec = 0
+    vec_tgts = set()
+    try:
+        sb = data[HDR:HDR + first_det]
+        k = sb.find(b"\xba")                    # first `mov dx, DGROUP`
+        dg = int.from_bytes(sb[k + 1:k + 3], "little") * 16
+        for ins in Decoder(sb, base_offset=0).decode_all():
+            o = ins.op1
+            if (ins.mnemonic == "call" and o and o.type == OpType.MEM
+                    and not o.base and not getattr(o, "index", None) and o.size == 2):
+                a_ = dg + o.disp + HDR
+                t = int.from_bytes(data[a_:a_ + 2], "little")
+                if 0 < t < first_det:
+                    call_tgts.add(t)
+                    n_vec += 1
+                elif first_det <= t < code_end - HDR:
+                    vec_tgts.add(t)         # inside an analyzer range: force a start
+    except Exception:
+        pass
+
     funcs = [("fn_00000", 0, first_det)]
     ct = sorted(call_tgts)
     for i, s in enumerate(ct):
@@ -318,7 +342,8 @@ def main():
             seen[s] = (name, s, det_end.get(s, e))
     funcs = sorted(seen.values(), key=lambda t: t[1])
     known = {io: name for name, io, _ in funcs}
-    print(f"  startup: fn_00000=[0,0x{first_det:X}) + {len(ct)} call-target subroutines")
+    print(f"  startup: fn_00000=[0,0x{first_det:X}) + {len(ct)} call-target subroutines "
+          f"({n_vec} via startup hook vectors)")
 
     def decode(s):
         try:
@@ -562,6 +587,9 @@ def main():
             else:
                 ignored.add(c)
         for t in res["tail"]:
+            if t not in known:
+                new.add(t)
+        for t in vec_tgts:
             if t not in known:
                 new.add(t)
         # Video-mode thunks: tables of one word per mode (0 = unsupported),

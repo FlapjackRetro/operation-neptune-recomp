@@ -129,6 +129,18 @@ ON.EXE has ~67 distinct `jmp word cs:[bx+table]` Borland switches (plus 7
 ## Not done yet
 
 - `jmp cs:[bp+..]` (7) and `call cs:[bx+..]` (5) forms.
-- Borland `_INIT_` table, CRT overrides.
+- (done: no _INIT_ table exists, hook vectors handled) Borland `_INIT_` table, CRT overrides.
 - Validate forced starts; filter noisy segments in the segment map.
 - `runtime/recomp16` host (DOS/BIOS/EGA on SDL2) and the CMake build.
+
+## Init table / startup hooks
+
+ON.EXE has no TC++-style `_INIT_` table of 6-byte {flag, priority, far ptr}
+records (no `mov si,_INIT_ / mov di,_INITEND` pair in the startup). Turbo C 2.0
+instead calls three near hooks through DGROUP vectors, each `push cs / call
+word ds:[vec]`: `[3F1A]`=0x283, `[3F1C]`=0x343, `[3F1E]`=0x1A6 (a bare `retf`
+stub). The code pointers live only in data, so the driver now reads those
+vectors from DGROUP and turns the targets into functions (0x1A6 joins the
+startup subroutines; 0x283/0x343 sit inside analyzer ranges and are forced
+starts). Result: 755 functions, 0 lift errors, 115 forced starts. The
+`init_list_targets` step is therefore not needed for this binary.
