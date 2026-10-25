@@ -50,6 +50,11 @@ import largemodel16 as lm  # noqa: E402
 import lift16             # noqa: E402
 from decode16 import Decoder, OpType  # noqa: E402
 from lift16 import Lifter  # noqa: E402
+import decode16  # noqa: E402
+
+# ON.EXE's floating point is Borland 8087-emulator code (CD 34..3D + modrm).
+# Normalise it to real ESC opcodes, as the emulator does when an 8087 exists.
+decode16.EMU87_INTS = True
 
 DEFAULT_EXE = os.path.join(os.path.dirname(ROOT), "ON.EXE")
 OUT = os.path.join(ROOT, "gen")
@@ -279,6 +284,16 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
     return out, inferred, tmap, unb, bases
 
 
+# Functions skipped by the lifter and supplied natively by the runtime
+# (same fn_XXXXX name, so callers and the dispatch table are unchanged).
+OVERRIDES = {
+    0x002BE: 'Borland 8087-emulator installer: hooks INT 34h..3Dh (and 3Eh/3Fh) via'
+             ' INT 21h/25h and probes for an FPU. FP sites are normalised to'
+             ' real ESC opcodes at lift time, so the emulator never runs; the'
+             ' rest of the emulator (0x405..0x5BA) is only reachable from here',
+}
+
+
 def main():
     exe = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EXE
     data = open(exe, "rb").read()
@@ -479,10 +494,13 @@ def main():
         os.makedirs(OUT, exist_ok=True)
         res = dict(bodies=[], calls=set(), lifted=0, failed=[], wrapped=0, segs=set(),
                    switches=0, arms=0, switch_total=0, tail=set(), thunks=set(),
-                   tables={}, unres=[])
+                   tables={}, unres=[], overridden=[])
         for name, io, end in funcs:
             cs = cs_of(io)
             res["segs"].add(cs)
+            if io in OVERRIDES:
+                res["overridden"].append(name)
+                continue
             try:
                 insns, jt, _, jbases = decode_func(io, end, cs, infer=True)
                 base = cs * 16
@@ -657,6 +675,7 @@ def main():
           f"`jmp cs:[bx+..]` ({res['arms']} arms)")
     print(f"  shared-table switches: {shared_stats} arms reused from tables resolved elsewhere")
     print(f"  video-mode thunks: {thunk_stats[0]} tables, {thunk_stats[1]} per-mode arms")
+    print(f"  native overrides: {', '.join(res['overridden']) or 'none'}")
     print(f"  forced starts total: {forced_total}; ignored out-of-code far targets: {len(ignored)}")
 
     names = [n for n, _, _ in funcs]
@@ -675,6 +694,10 @@ def main():
         f.write("\n")
         for n in names:
             f.write(f"void {n}(CPU *cpu);\n")
+        f.write("\n/* native overrides (implement in the runtime):\n")
+        for io_, why in sorted(OVERRIDES.items()):
+            f.write(f" *   fn_{io_:05X}: {why}\n")
+        f.write(" */\n")
         f.write("\n#endif\n")
 
     print(f"\nlifted {lifted}/{len(funcs)} functions, {len(failed)} lift errors, "

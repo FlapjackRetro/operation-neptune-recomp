@@ -144,3 +144,29 @@ vectors from DGROUP and turns the targets into functions (0x1A6 joins the
 startup subroutines; 0x283/0x343 sit inside analyzer ranges and are forced
 starts). Result: 755 functions, 0 lift errors, 115 forced starts. The
 `init_list_targets` step is therefore not needed for this binary.
+
+## CRT overrides / floating point
+
+ON.EXE's floating point is Borland 8087-emulator code: every x87 op is
+`CD 34..3B <modrm>` (ESC D8..DF), `CD 3C` (segment-override ESC), `CD 3D`
+(FWAIT) -- 426 sites in 40 functions. Lifted naively, the bytes after each
+`CD 3x` decode as unrelated instructions (that is what made fn_005C7 etc. look
+like junk). `lift_full.py` now sets `decode16.EMU87_INTS = True`, which
+normalises them to real ESC opcodes, as the emulator does when an 8087 exists.
+
+- `OVERRIDES` table added (same idea as dinopark): listed functions are not
+  lifted; the runtime supplies them under the same `fn_XXXXX` name. Listed in
+  `gen/recomp_all.h`. First entry: fn_002BE, the emulator installer
+  (hooks INT 34h..3Dh through INT 21h/25h). The rest of the emulator
+  (0x405..0x5BA) is only called from it, so it goes dead.
+- fn_005C7 is `__ftol`-style (fnstcw / or 0xC00 / fldcw / fistp); the game
+  calls it from 4 places. Kept lifted.
+- No int86/int86x stack-built `int nn` stub exists in this binary (searched
+  for `mov [bp+x], 0xCD`), no `sprintf` override chosen yet: those were found
+  by dinopark at runtime, and there is no runtime here to fail yet.
+
+**Gap:** pcrecomp's `lift16` emits x87 instructions only as comments
+(`/* FPU: esc_N ... */`), so float code is a no-op in the generated C until
+the lifter emits real FPU ops (`disasm/fpu_decode.py` and `ne_lift.py` are
+the starting points). The runtime also needs an x87 stack (`dos32`/`native32`
+have one to borrow).
