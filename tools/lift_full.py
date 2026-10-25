@@ -149,36 +149,94 @@ def main():
             return []
     cs_of = build_segmap(det_end, decode)
 
-    os.makedirs(OUT, exist_ok=True)
-    bodies, all_calls, lifted, failed, n_wrapped = [], set(), 0, [], 0
-    segs_used = set()
-    for name, io, end in funcs:
-        cs = cs_of(io)
-        segs_used.add(cs)
+    code_end_img = code_end - HDR
+
+    def flow_end(t, cap):
+        """End of a forced function: follow control flow to the first ret/retf
+        that no earlier jump reaches past (next start is the usual answer)."""
         try:
-            insns = Decoder(data[io + HDR:end + HDR], base_offset=io).decode_all()
-            base = cs * 16
-            for ins in insns:                 # wrap-correct near call/jmp targets
-                o = ins.op1
-                if ins.mnemonic in ("call", "jmp") and o and o.type == OpType.REL16:
-                    t = base + ((io - base + o.disp) & 0xFFFF)
-                    if t != io + o.disp:
-                        o.disp = t - io
-                        n_wrapped += 1
-            lifter = Lifter(hdr_size=HDR, known_funcs=known)
-            lifter.dispatch = True
-            lifter.far_base = 0
-            lift16._CODE_SEG = f"{cs:04X}"
-            body = lifter.lift_function(name, insns, io, is_far=True)
-            body = body.replace("(CPU *cpu)\n{",
-                                f"(CPU *cpu)\n{{\n    cpu->cs = SEG_{cs:04X};", 1)
-            bodies.append(body)
-            all_calls |= lifter.func_calls
-            lifted += 1
-        except Exception as e:
-            failed.append((name, str(e)))
-            bodies.append(f"/* {name}: lift failed: {e} */\n"
-                          f"void {name}(CPU*cpu){{(void)cpu;}}")
+            insns = Decoder(data[t + HDR:cap + HDR], base_offset=t).decode_all()
+        except Exception:
+            return None
+        reach = t
+        for ins in insns:
+            o = ins.op1
+            if (ins.mnemonic.startswith(('j', 'loop')) and o
+                    and o.type in (OpType.REL8, OpType.REL16)):
+                reach = max(reach, t + (o.disp & 0xFFFF))
+            if ins.mnemonic in ('ret', 'ret far', 'retf') and ins.offset >= reach:
+                return ins.offset + ins.length
+        return None
+
+    def lift_pass(funcs, known):
+        os.makedirs(OUT, exist_ok=True)
+        res = dict(bodies=[], calls=set(), lifted=0, failed=[], wrapped=0, segs=set())
+        for name, io, end in funcs:
+            cs = cs_of(io)
+            res["segs"].add(cs)
+            try:
+                insns = Decoder(data[io + HDR:end + HDR], base_offset=io).decode_all()
+                base = cs * 16
+                for ins in insns:             # wrap-correct near call/jmp targets
+                    o = ins.op1
+                    if ins.mnemonic in ("call", "jmp") and o and o.type == OpType.REL16:
+                        t = base + ((io - base + o.disp) & 0xFFFF)
+                        if t != io + o.disp:
+                            o.disp = t - io
+                            res["wrapped"] += 1
+                lifter = Lifter(hdr_size=HDR, known_funcs=known)
+                lifter.dispatch = True
+                lifter.far_base = 0
+                lift16._CODE_SEG = f"{cs:04X}"
+                body = lifter.lift_function(name, insns, io, is_far=True)
+                body = body.replace("(CPU *cpu)\n{",
+                                    f"(CPU *cpu)\n{{\n    cpu->cs = SEG_{cs:04X};", 1)
+                res["bodies"].append(body)
+                res["calls"] |= lifter.func_calls
+                res["lifted"] += 1
+            except Exception as e:
+                res["failed"].append((name, str(e)))
+                res["bodies"].append(f"/* {name}: lift failed: {e} */\n"
+                                     f"void {name}(CPU*cpu){{(void)cpu;}}")
+        return res
+
+    # Iterate: unresolved far calls whose target is real code become forced
+    # function starts (assembly helpers have no prologue, so the analyzer
+    # misses them). Far targets past the code region are data noise: ignored.
+    forced_total, ignored = 0, set()
+    for rnd in range(6):
+        res = lift_pass(funcs, known)
+        new = set()
+        for c in res["calls"]:
+            if c in known.values():
+                continue
+            if c.startswith("far_"):
+                _, sg, off = c.split("_")
+                t = int(sg, 16) * 16 + int(off, 16)
+            elif c.startswith("res_"):        # near target the analyzer missed
+                t = int(c[4:], 16)
+            else:
+                continue
+            if 0 <= t < code_end_img:
+                if t not in known:
+                    new.add(t)
+            else:
+                ignored.add(c)
+        if not new:
+            break
+        allpts = sorted(set(known) | new)
+        for t in sorted(new):
+            i = allpts.index(t)
+            e = allpts[i + 1] if i + 1 < len(allpts) else None
+            e = e or flow_end(t, min(code_end_img, t + 0x400)) or t + 0x40
+            funcs.append((f"fn_{t:05X}", t, e))
+            known[t] = f"fn_{t:05X}"
+        funcs.sort(key=lambda x: x[1])
+        forced_total += len(new)
+        print(f"  round {rnd + 1}: {len(new)} forced function starts (far + near)")
+    bodies, all_calls, lifted = res["bodies"], res["calls"], res["lifted"]
+    failed, n_wrapped, segs_used = res["failed"], res["wrapped"], res["segs"]
+    print(f"  forced starts total: {forced_total}; ignored out-of-code far targets: {len(ignored)}")
 
     names = [n for n, _, _ in funcs]
     stubs = sorted(c for c in all_calls if c not in set(names))

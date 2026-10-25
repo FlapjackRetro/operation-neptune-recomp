@@ -32,17 +32,22 @@
 - 639 functions lifted (636 + Borland startup `fn_00000` + 2 startup call
   targets), 0 lift errors, ~71K lines of C into `gen/` (git-ignored).
 - 726 near call/jmp targets needed wrap correction.
-- 107 call targets are unresolved (`far_0000_010D`, `far_0000_0172`, ...): far
-  calls into segment 0 that land on code the analyzer did not detect as
-  functions (no prologue; likely RTL assembly helpers). They compile to empty
-  stubs until added as forced function starts (dinopark's "miss-target" loop).
+- Forced function starts: unresolved far and near call targets that land in the
+  code region become functions (analyzer misses prologue-less assembly helpers).
+  One round added 98 (far + near), converging in one pass: **737 functions
+  lifted, 0 lift errors, 9 unresolved call targets**. Those 9 are far/near
+  targets outside the code region (`far_2341_0000`, `far_FFFF_9A20`,
+  `res_02A7D5`, ...): data decoded as code, ignored for now.
+- Caveat: forced starts are not validated against a prologue/instruction
+  boundary check (dinopark's `valid_boundary`), so some of the 98 may be
+  mid-function targets. They overlap existing functions, which the lifter
+  tolerates, but the list should be audited once the boot runs.
 - Far-call targets show 123 distinct segment values; the real ones are few
-  (0, 145, 586, 605, 641, 793, ...). The rest (e.g. 34840, 65535) look like
-  data decoded as code and need filtering. The segment map reports 113 distinct
-  code segments, likely inflated by the same noise.
+  (0, 145, 586, 605, 641, 793, ...). The rest (e.g. 34840, 65535) are noise.
+  The segment map reports 113 distinct code segments, likely inflated by it.
 
 ## Not done yet
 
 - Jump tables / switch arms, Borland `_INIT_` table, CRT overrides.
-- Forced function starts for the 107 unresolved far targets.
+- Validate forced starts; filter noisy segments in the segment map.
 - `runtime/recomp16` host (DOS/BIOS/EGA on SDL2) and the CMake build.
