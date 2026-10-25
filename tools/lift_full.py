@@ -57,7 +57,7 @@ CHUNK = 60
 ENTRY_IMG = 0x0000                      # MZ CS:IP = 0000:0000
 
 
-def build_segmap(ends, decode):
+def build_segmap(ends, decode, code_end_img):
     """image offset -> the code segment (CS) each function runs under.
 
     1. A far call/jmp states its target's CS outright (seed).
@@ -85,7 +85,12 @@ def build_segmap(ends, decode):
             if b not in seg and fits(b, seg[a]):
                 seg[b] = seg[a]
                 work.append(b)
-    ks = sorted(k for k in seg if k in ends or k == ENTRY_IMG)
+    # Any far-call target inside the code region states its CS, whether or not
+    # the analyzer found a function there (a driver's entry vector at 0x910 is
+    # a run of `jmp` stubs, not functions). Seeds outside the code region are
+    # data decoded as code and are left out.
+    ks = sorted(k for k in seg if (k in ends or k == ENTRY_IMG or 0 <= k < code_end_img)
+                and fits(k, seg[k]))
 
     def cs_of(fn):
         if fn in seg and fits(fn, seg[fn]):
@@ -319,7 +324,7 @@ def main():
             return Decoder(data[s + HDR:det_end.get(s, s) + HDR], base_offset=s).decode_all()
         except Exception:
             return []
-    cs_of = build_segmap(det_end, decode)
+    cs_of = build_segmap(det_end, decode, code_end - HDR)
 
     code_end_img = code_end - HDR
 
@@ -447,7 +452,7 @@ def main():
     def lift_pass(funcs, known):
         os.makedirs(OUT, exist_ok=True)
         res = dict(bodies=[], calls=set(), lifted=0, failed=[], wrapped=0, segs=set(),
-                   switches=0, arms=0, switch_total=0)
+                   switches=0, arms=0, switch_total=0, tail=set(), thunks=set())
         for name, io, end in funcs:
             cs = cs_of(io)
             res["segs"].add(cs)
@@ -461,10 +466,33 @@ def main():
                         if t != io + o.disp:
                             o.disp = t - io
                             res["wrapped"] += 1
+                # Near `jmp` out of the function is a tail call. The lifter emits
+                # it as recomp_dispatch without naming the target, so the
+                # forced-start search never sees it unless collected here.
+                for ins in insns:
+                    o = ins.op1
+                    if ins.mnemonic == 'jmp' and o and o.type == OpType.REL16:
+                        t = io + o.disp
+                        if not (io <= t < end) and 0 <= t < code_end_img:
+                            res["tail"].add(t)
                 lifter = Lifter(hdr_size=HDR, known_funcs=known)
                 lifter.dispatch = True
                 lifter.far_base = 0
                 lifter.jump_tables = jt
+                # Video-mode thunk: `xor bh,bh / mov bl,[mode] / shl bx,1 /
+                # jmp cs:[bx+table]` -- each driver entry point picks its
+                # per-mode routine from a table of near offsets.
+                for k, x in enumerate(insns):
+                    o = x.op1
+                    if (x.mnemonic == 'jmp' and o and o.type == OpType.MEM
+                            and o.base == 'bx' and o.seg == 'cs' and x.address not in jt
+                            and k == 3):    # the thunk is the whole function (starts at the xor)
+                        a3, a2, a1 = insns[k - 3], insns[k - 2], insns[k - 1]
+                        if (a3.mnemonic == 'xor' and repr(a3.op1) == 'bh' == repr(a3.op2)
+                                and a2.mnemonic == 'mov' and repr(a2.op1) == 'bl'
+                                and a2.op2 and a2.op2.type == OpType.MEM
+                                and a1.mnemonic == 'shl' and repr(a1.op1) == 'bx'):
+                            res["thunks"].add((cs, o.disp))
                 res["switches"] += len(jt)
                 res["arms"] += sum(len(v) for v in jt.values())
                 if os.environ.get("NEP_DEBUG_SWITCH"):
@@ -500,7 +528,7 @@ def main():
     # Iterate: unresolved far calls whose target is real code become forced
     # function starts (assembly helpers have no prologue, so the analyzer
     # misses them). Far targets past the code region are data noise: ignored.
-    forced_total, ignored = 0, set()
+    forced_total, ignored, dbg_seen = 0, set(), set()
     for rnd in range(6):
         propagate_cs()
         res = lift_pass(funcs, known)
@@ -520,6 +548,34 @@ def main():
                     new.add(t)
             else:
                 ignored.add(c)
+        for t in res["tail"]:
+            if t not in known:
+                new.add(t)
+        # Video-mode thunks: tables of one word per mode (0 = unsupported),
+        # laid out back to back. A thunk's table ends where the next thunk's
+        # (same CS) begins; the last one gets the typical length.
+        by_cs = {}
+        for cs_, d in res["thunks"]:
+            by_cs.setdefault(cs_, set()).add(d)
+        n_thunk_arms = 0
+        for cs_, ds in by_cs.items():
+            ds = sorted(ds)
+            gaps = [(b - a) // 2 for a, b in zip(ds, ds[1:]) if 0 < (b - a) // 2 <= 16]
+            typical = max(set(gaps), key=gaps.count) if gaps else 5
+            for k, d in enumerate(ds):
+                n = (ds[k + 1] - d) // 2 if k + 1 < len(ds) and (ds[k + 1] - d) // 2 <= 16 else typical
+                for q in range(n):
+                    a = cs_ * 16 + d + 2 * q + HDR
+                    w = int.from_bytes(data[a:a + 2], 'little')
+                    t = cs_ * 16 + w
+                    if os.environ.get("NEP_DEBUG_SWITCH") and (cs_, d, q) not in dbg_seen and w:
+                        dbg_seen.add((cs_, d, q))
+                        print(f"  THUNK cs={cs_:04X} table disp={d:#x} entry {q}: -> {t:05X}")
+                    if w and 0 <= t < code_end_img:
+                        n_thunk_arms += 1
+                        if t not in known:
+                            new.add(t)
+        thunk_stats = (len(res["thunks"]), n_thunk_arms)
         if not new:
             break
         allpts = sorted(set(known) | new)
@@ -536,6 +592,7 @@ def main():
     failed, n_wrapped, segs_used = res["failed"], res["wrapped"], res["segs"]
     print(f"  switches: {res['switches']} resolved of {res['switch_total']} "
           f"`jmp cs:[bx+..]` ({res['arms']} arms)")
+    print(f"  video-mode thunks: {thunk_stats[0]} tables, {thunk_stats[1]} per-mode arms")
     print(f"  forced starts total: {forced_total}; ignored out-of-code far targets: {len(ignored)}")
 
     names = [n for n, _, _ in funcs]

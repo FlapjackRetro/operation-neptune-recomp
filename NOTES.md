@@ -33,10 +33,14 @@
   targets), 0 lift errors, ~71K lines of C into `gen/` (git-ignored).
 - 726 near call/jmp targets needed wrap correction.
 - Forced function starts: unresolved far and near call targets that land in the
-  code region become functions (analyzer misses prologue-less assembly helpers).
-  One round adds 97. Result: **736 functions lifted, 0 lift errors**, 6
-  unresolved targets, all outside the code region (data decoded as code,
-  ignored).
+  code region become functions (analyzer misses prologue-less assembly helpers),
+  and so do **near tail-jump targets out of a function** (the lifter emits
+  those as `recomp_dispatch` without naming the target, so they have to be
+  collected separately; missing them left the video driver's entry vector
+  jumping into functions that did not exist) and the per-mode arms of the
+  video-mode thunks (below). 3 rounds add 108 in all. Result: **747 functions
+  lifted, 0 lift errors**, 6 unresolved targets, all outside the code region
+  (data decoded as code, ignored).
 - Caveat: forced starts are not validated against a prologue/instruction
   boundary check (dinopark's `valid_boundary`), so some may be mid-function
   targets. They overlap existing functions, which the lifter tolerates; audit the
@@ -89,26 +93,35 @@ ON.EXE has ~67 distinct `jmp word cs:[bx+table]` Borland switches (plus 7
     lifter sends them to `recomp_dispatch`), internal arms off an instruction
     boundary are dropped.
   - A forced start nested inside a function whose CS was inferred inherits it.
-- Result: **68 of 72** switch sites resolved (964 arms; duplicates from
-  overlapping functions included), 736 functions, 0 lift errors. Remaining
+- Result: **68 of 74** switch sites resolved (964 arms; duplicates from
+  overlapping functions included), 747 functions, 0 lift errors. Remaining
   (`NEP_DEBUG_SWITCH=1` lists them, `NEP_DEBUG_INFER=1` shows candidate bases):
-  1. Video-mode thunks (fn_008EC / fn_00946 / fn_00AB1: `mov bl, ds:[0x588F]` /
-     `shl bx,1` / `jmp cs:[bx+0x3C]`). These are not switches inside a function:
-     module 0x910 (CS=0x91) is a video driver and each entry point tail-jumps
-     through a per-mode table at 0x94C to the mode-specific routine
-     (words 0, 0x1A1, 0, 0x258, 0x294, 0, 0x2A7, 0 -> 0xAB1, 0xB68, 0xBA4,
-     0xBB7; zero = unsupported mode). The arms are other functions, so the
-     lifter's generic `recomp_dispatch(cpu, cs, target)` is the right output,
-     but it needs the right CS (the segment map gives fn_008EC and fn_00AB1 CS=0)
-     and the targets (0xB68, 0xBA4 are entries inside fn_00AB1's analyzer
-     range) to exist as functions. Left to the dispatch-miss loop.
+  1. Video-mode thunks: solved, but not as switches. Module 0x910 (CS=0x91) is
+     the video driver. It starts with an 18-entry vector of `jmp rel16` stubs
+     (0x910, 0x913, ...; far calls go to `0x91:0x3` etc., 195 calls to the
+     0x913 stub alone). Each stub tail-jumps to a thunk -- `xor bh,bh / mov bl,
+     ds:[0x588F] / shl bx,1 / jmp cs:[bx+D]` -- which picks the per-mode
+     routine from a table of 5 words (video mode 0..4; 0 = unsupported):
+     0xAA4 (D=0x3C) -> 0xAB1, 0xB68, 0xBA4 (int 10h modes 0x0E, 0x09, 0x13);
+     0xBAA (D=0x46) -> 0xBB7, 0x10D5, 0x114B. Fixes:
+     - tail-jump targets are now forced function starts (fn_00AA4, fn_00BAA);
+     - the segment map's nearest-seed fallback only used seeds that were
+       analyzer function starts, so the thunks got CS=0 and read their table
+       from the wrong place. Any in-code-region far-call target now seeds it;
+     - a thunk (a function starting at the `xor bh,bh`) has its table read
+       (length = gap to the next thunk's table, else the typical 5) and every
+       non-zero arm becomes a forced start. The jmp itself stays a runtime
+       `recomp_dispatch(cpu, 0x91, word)`, which is correct since the arms are
+       other functions. The analyzer's overlapping ranges fn_008EC / fn_00946 /
+       fn_00AB1 contain the same jmp but are not entered as functions, so the
+       "unresolved switch" report still lists them; ignore those.
   2. fn_021E4: a copy of fn_01D8C's tile blitter with a single switch, so two
      adjacent bases tie. Needs a tiebreaker (e.g. the matching table in the
      other copy).
 
 ## Not done yet
 
-- The video thunks and fn_021E4 above; `jmp cs:[bp+..]` and `call cs:[bx+..]` forms.
+- fn_021E4 above; `jmp cs:[bp+..]` and `call cs:[bx+..]` forms.
 - Borland `_INIT_` table, CRT overrides.
 - Validate forced starts; filter noisy segments in the segment map.
 - `runtime/recomp16` host (DOS/BIOS/EGA on SDL2) and the CMake build.
