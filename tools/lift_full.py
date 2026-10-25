@@ -138,6 +138,7 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
       inferred   [segment values taken from the tables]
       tmap       {jmp instruction address: (table start, table end)} image offs
       unbounded  set of jmp addresses whose table length was a guess
+      bases      {jmp instruction address: the CS*16 its table was read under}
     """
     out, inferred, tmap, unb, pending, bases = {}, [], {}, set(), [], {}
 
@@ -275,7 +276,7 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
             if n < 3:
                 del out[addr], tmap[addr]
                 unb.discard(addr)
-    return out, inferred, tmap, unb
+    return out, inferred, tmap, unb, bases
 
 
 def main():
@@ -382,7 +383,7 @@ def main():
             return insns
 
         insns = Decoder(data[io + HDR:end + HDR], base_offset=io).decode_all()
-        jt, inf, tmap, unb = jump_tables(data, HDR, insns, cs, io, end, io=io, infer=infer)
+        jt, inf, tmap, unb, bases = jump_tables(data, HDR, insns, cs, io, end, io=io, infer=infer)
         if tmap:
             for _ in range(2):
                 insns = piecewise(set(tmap.values()))
@@ -413,7 +414,7 @@ def main():
                     break
             else:
                 insns = piecewise(set(tmap.values()))
-        return insns, jt, inf
+        return insns, jt, inf, bases
 
     # Segment inference from switch tables: where the segment map guessed wrong
     # the table reads junk; a base that makes every arm land on an instruction
@@ -422,7 +423,7 @@ def main():
     cs_over, cs_conflict = {}, 0
     for name, io, end in funcs:
         try:
-            _, _, inf = decode_func(io, end, cs_of(io), infer=True)
+            _, _, inf, _b = decode_func(io, end, cs_of(io), infer=True)
         except Exception:
             continue
         if inf:
@@ -452,12 +453,13 @@ def main():
     def lift_pass(funcs, known):
         os.makedirs(OUT, exist_ok=True)
         res = dict(bodies=[], calls=set(), lifted=0, failed=[], wrapped=0, segs=set(),
-                   switches=0, arms=0, switch_total=0, tail=set(), thunks=set())
+                   switches=0, arms=0, switch_total=0, tail=set(), thunks=set(),
+                   tables={}, unres=[])
         for name, io, end in funcs:
             cs = cs_of(io)
             res["segs"].add(cs)
             try:
-                insns, jt, _ = decode_func(io, end, cs, infer=True)
+                insns, jt, _, jbases = decode_func(io, end, cs, infer=True)
                 base = cs * 16
                 for ins in insns:             # wrap-correct near call/jmp targets
                     o = ins.op1
@@ -493,6 +495,17 @@ def main():
                                 and a2.op2 and a2.op2.type == OpType.MEM
                                 and a1.mnemonic == 'shl' and repr(a1.op1) == 'bx'):
                             res["thunks"].add((cs, o.disp))
+                # Tables validated here, so another function reading the same
+                # (CS base, disp) can reuse them; and the switches that failed.
+                by_addr = {x.address: x for x in insns}
+                for addr, arms in jt.items():
+                    d = by_addr[addr].op1.disp
+                    res["tables"].setdefault(d, {})[jbases[addr]] = arms
+                for x in insns:
+                    o = x.op1
+                    if (x.mnemonic == 'jmp' and o and o.type == OpType.MEM
+                            and o.base == 'bx' and o.seg == 'cs' and x.address not in jt):
+                        res["unres"].append((io, end, cs, o.disp))
                 res["switches"] += len(jt)
                 res["arms"] += sum(len(v) for v in jt.values())
                 if os.environ.get("NEP_DEBUG_SWITCH"):
@@ -576,7 +589,29 @@ def main():
                         if t not in known:
                             new.add(t)
         thunk_stats = (len(res["thunks"]), n_thunk_arms)
-        if not new:
+        # Shared tables: a function that jumps through a table another function
+        # already resolved (same CS base and disp -- e.g. a copy of a blitter in
+        # the same module) gets its arms as forced starts. If its CS was
+        # guessed wrong but exactly one validated base fits, adopt that CS.
+        cs_changed, n_shared = False, 0
+        for io_, end_, cs_, d in res["unres"]:
+            cands = res["tables"].get(d, {})
+            base = cs_ * 16
+            if base not in cands:
+                fit = [b for b in cands if 0 <= io_ - b < 0x10000]
+                if len(fit) != 1:
+                    continue
+                base = fit[0]
+                if cs_over.get(io_) != base >> 4:
+                    cs_over[io_] = base >> 4
+                    cs_changed = True
+            for t in cands[base]:
+                if 0 <= t < code_end_img:
+                    n_shared += 1
+                    if t not in known:
+                        new.add(t)
+        shared_stats = n_shared
+        if not new and not cs_changed:
             break
         allpts = sorted(set(known) | new)
         for t in sorted(new):
@@ -592,6 +627,7 @@ def main():
     failed, n_wrapped, segs_used = res["failed"], res["wrapped"], res["segs"]
     print(f"  switches: {res['switches']} resolved of {res['switch_total']} "
           f"`jmp cs:[bx+..]` ({res['arms']} arms)")
+    print(f"  shared-table switches: {shared_stats} arms reused from tables resolved elsewhere")
     print(f"  video-mode thunks: {thunk_stats[0]} tables, {thunk_stats[1]} per-mode arms")
     print(f"  forced starts total: {forced_total}; ignored out-of-code far targets: {len(ignored)}")
 

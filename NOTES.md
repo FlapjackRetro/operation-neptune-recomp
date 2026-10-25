@@ -38,7 +38,7 @@
   those as `recomp_dispatch` without naming the target, so they have to be
   collected separately; missing them left the video driver's entry vector
   jumping into functions that did not exist) and the per-mode arms of the
-  video-mode thunks (below). 3 rounds add 108 in all. Result: **747 functions
+  video-mode thunks (below). 3 rounds add 113 in all. Result: **752 functions
   lifted, 0 lift errors**, 6 unresolved targets, all outside the code region
   (data decoded as code, ignored).
 - Caveat: forced starts are not validated against a prologue/instruction
@@ -93,9 +93,9 @@ ON.EXE has ~67 distinct `jmp word cs:[bx+table]` Borland switches (plus 7
     lifter sends them to `recomp_dispatch`), internal arms off an instruction
     boundary are dropped.
   - A forced start nested inside a function whose CS was inferred inherits it.
-- Result: **68 of 74** switch sites resolved (964 arms; duplicates from
-  overlapping functions included), 747 functions, 0 lift errors. Remaining
-  (`NEP_DEBUG_SWITCH=1` lists them, `NEP_DEBUG_INFER=1` shows candidate bases):
+- Result: **69 of 75** switch sites resolved (973 arms; duplicates from
+  overlapping functions included), 752 functions, 0 lift errors. All 4 originally unresolved cases are now handled
+  (`NEP_DEBUG_SWITCH=1` still lists them, `NEP_DEBUG_INFER=1` shows candidate bases):
   1. Video-mode thunks: solved, but not as switches. Module 0x910 (CS=0x91) is
      the video driver. It starts with an 18-entry vector of `jmp rel16` stubs
      (0x910, 0x913, ...; far calls go to `0x91:0x3` etc., 195 calls to the
@@ -115,13 +115,20 @@ ON.EXE has ~67 distinct `jmp word cs:[bx+table]` Borland switches (plus 7
        other functions. The analyzer's overlapping ranges fn_008EC / fn_00946 /
        fn_00AB1 contain the same jmp but are not entered as functions, so the
        "unresolved switch" report still lists them; ignore those.
-  2. fn_021E4: a copy of fn_01D8C's tile blitter with a single switch, so two
-     adjacent bases tie. Needs a tiebreaker (e.g. the matching table in the
-     other copy).
+  2. fn_021E4: solved. It is a second blitter in the same module (CS=0x91) whose
+     single `jmp cs:[bx+0x15E4]` reads the *same* table fn_01D8C already uses
+     (0x1EF4, arms 0x1E69 / 0x1E51 / 0x1E3E / 0x1E2B ... inside fn_01D8C), so no
+     arm is inside fn_021E4 and it could not be resolved on its own (two adjacent
+     bases tied). The segment-map seeding fix above already gave it CS=0x91, so
+     its jmp lifts to `recomp_dispatch(cpu, 0x91, word)` correctly. What was
+     missing was the arms as functions: lift_pass now registers every validated
+     table by (CS base, disp); a switch that failed reads the same key and its
+     arms become forced starts (9 arm reads, 5 new functions). If its CS was
+     guessed wrong but exactly one validated base fits, that CS is adopted.
 
 ## Not done yet
 
-- fn_021E4 above; `jmp cs:[bp+..]` and `call cs:[bx+..]` forms.
+- `jmp cs:[bp+..]` (7) and `call cs:[bx+..]` (5) forms.
 - Borland `_INIT_` table, CRT overrides.
 - Validate forced starts; filter noisy segments in the segment map.
 - `runtime/recomp16` host (DOS/BIOS/EGA on SDL2) and the CMake build.
