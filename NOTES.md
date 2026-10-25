@@ -34,7 +34,7 @@
 - 726 near call/jmp targets needed wrap correction.
 - Forced function starts: unresolved far and near call targets that land in the
   code region become functions (analyzer misses prologue-less assembly helpers).
-  One round adds 98. Result: **737 functions lifted, 0 lift errors**, 7
+  One round adds 97. Result: **736 functions lifted, 0 lift errors**, 6
   unresolved targets, all outside the code region (data decoded as code,
   ignored).
 - Caveat: forced starts are not validated against a prologue/instruction
@@ -74,10 +74,24 @@ ON.EXE has ~67 distinct `jmp word cs:[bx+table]` Borland switches (plus 7
   re-expressed against the function start.** (A first version of this pass did
   not; it left jumps in every piece after the first pointing at the wrong
   place and inflated the forced-start count from 98 to 138. Fixed.)
-- Result: **60 of 72** switch sites resolved (793 arms; duplicates from
-  overlapping functions included). 12 sites remain, ~9 distinct, falling back to
-  runtime dispatch (`NEP_DEBUG_SWITCH=1` lists them with CS, bound and table
-  words, `NEP_DEBUG_INFER=1` shows the candidate bases):
+- Unbounded dense switches (no `cmp`, e.g. `mov bh,0 / shl bx,1 /
+  jmp cs:[bx+0x2007]` in fn_1FDCB, a 5-switch interpreter-style routine): the
+  table length is a guess, and the tables are not right after the jmp. All four
+  of its tables are valid together at exactly one base (0x1DE90, CS=0x1DE9), so
+  intersecting candidates across the function's switches finds it. Then:
+  - Nothing can point into a table, so a table ends at the first arm target
+    that lies after its start. The 0x246d table mixes internal arms with tail
+    jumps to other functions (0x1F052, 0x1DEAE, ...) and ends exactly at its
+    first internal arm (0x2033D): 32 entries. This is accepted only when a run
+    ends that way (<= 128 entries); otherwise the strict in-function run stands.
+  - Tables are also cut where the next table starts.
+  - After the table-skipping re-decode, arms outside the function stay (the
+    lifter sends them to `recomp_dispatch`), internal arms off an instruction
+    boundary are dropped.
+  - A forced start nested inside a function whose CS was inferred inherits it.
+- Result: **68 of 72** switch sites resolved (964 arms; duplicates from
+  overlapping functions included), 736 functions, 0 lift errors. Remaining
+  (`NEP_DEBUG_SWITCH=1` lists them, `NEP_DEBUG_INFER=1` shows candidate bases):
   1. Video-mode thunks (fn_008EC / fn_00946 / fn_00AB1: `mov bl, ds:[0x588F]` /
      `shl bx,1` / `jmp cs:[bx+0x3C]`). These are not switches inside a function:
      module 0x910 (CS=0x91) is a video driver and each entry point tail-jumps
@@ -91,13 +105,10 @@ ON.EXE has ~67 distinct `jmp word cs:[bx+table]` Borland switches (plus 7
   2. fn_021E4: a copy of fn_01D8C's tile blitter with a single switch, so two
      adjacent bases tie. Needs a tiebreaker (e.g. the matching table in the
      other copy).
-  3. fn_1FDCB (and its overlapping fn_201D6): 5 switches with no `cmp` bound
-     (`mov bh,0 / shl bx,1 / jmp cs:[bx+0x2007]`, an unbounded dispatch on a
-     byte), tables not after the jmp. Needs a table-length heuristic.
 
 ## Not done yet
 
-- The ~9 distinct unresolved switches above; `jmp cs:[bp+..]` and `call cs:[bx+..]` forms.
+- The video thunks and fn_021E4 above; `jmp cs:[bp+..]` and `call cs:[bx+..]` forms.
 - Borland `_INIT_` table, CRT overrides.
 - Validate forced starts; filter noisy segments in the segment map.
 - `runtime/recomp16` host (DOS/BIOS/EGA on SDL2) and the CMake build.

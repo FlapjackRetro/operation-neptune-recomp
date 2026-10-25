@@ -106,28 +106,35 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
 
     The table is a run of near offsets in the code segment; nothing names the
     arms but this one instruction. The preceding `cmp bx, N` / `jbe` bounds it,
-    failing that take entries while they land on an instruction boundary inside
-    this function. Two shapes (dinopark found both):
+    failing that take entries while they land inside this function. Shapes
+    (dinopark found the first two):
 
       dense:   cmp bx, N / jbe / jmp default / shl bx, 1 / jmp cs:[bx+table]
       sparse:  mov cx, N / mov bx, values / ... / jmp cs:[bx + N*2]
                (bx walks a list of case VALUES; arm offsets follow the values)
+      unbounded dense: no cmp at all (`mov bh,0 / shl bx,1 / jmp cs:[bx+t]`,
+               a dispatch on a byte the program keeps in range itself)
 
     The table sits at CS*16 + disp, so a wrong CS reads junk. With infer=True,
     a switch that fails under the supplied CS is retried against every
-    paragraph-aligned base up to 64K below the function; if exactly one base
-    gives a table whose arms all land on instruction boundaries (and whose
-    length matches the `cmp` bound), that base is taken as the true CS.
+    paragraph-aligned base up to 64K below the function. A function has one CS,
+    so the candidates of all its failing switches are intersected; one survivor
+    is taken as the true CS. Candidates must have the table right after the jmp
+    or, for a dense switch, anywhere in the function.
 
     Arms are accepted when they land inside the function ([lo, hi)), not on a
     decoded instruction boundary: the table lives in the code stream, so the
     linear decode runs through it and desyncs. The caller re-decodes around the
-    returned table extents and verifies the arms afterwards.
+    returned table extents and verifies the arms afterwards. An unbounded table
+    is cut where the next table starts (tables are laid out back to back).
 
-    Returns ({jmp instruction address: [absolute arm addresses]}, [inferred
-    segment values], [(table start, table end) image offsets]).
+    Returns (out, inferred, tmap, unbounded):
+      out        {jmp instruction address: [absolute arm addresses]}
+      inferred   [segment values taken from the tables]
+      tmap       {jmp instruction address: (table start, table end)} image offs
+      unbounded  set of jmp addresses whose table length was a guess
     """
-    out, inferred, tabs, pending = {}, [], [], []
+    out, inferred, tmap, unb, pending, bases = {}, [], {}, set(), [], {}
 
     def arms_at(base, ins, o, bx_imm, cx_imm, bound):
         if bx_imm is not None and cx_imm and o.disp == cx_imm * 2:
@@ -143,10 +150,11 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
             if not (lo <= t < hi):
                 break
             arms.append(t)
+        # bounded: exact length; unbounded: a run of 3+ (4+ when hunting a base)
         if arms and (bnd is None or len(arms) == bnd) and (bnd or len(arms) >= 3):
             first = base + bx_imm if (bx_imm is not None and cx_imm
                                       and o.disp == cx_imm * 2) else start
-            return arms, (first, start + 2 * len(arms))
+            return arms, (first, start + 2 * len(arms)), not bnd
         return None
 
     for idx, ins in enumerate(insns):
@@ -178,7 +186,10 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
         got = arms_at(cs * 16, ins, o, bx_imm, cx_imm, bound)
         if got:
             out[ins.address] = got[0]
-            tabs.append(got[1])
+            tmap[ins.address] = got[1]
+            bases[ins.address] = cs * 16
+            if got[2]:
+                unb.add(ins.address)
             continue
         if not infer or io is None:
             continue
@@ -193,18 +204,16 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
             # plus almost any base lands inside the function.
             if 0 <= got[1][0] - (ins.offset + ins.length) <= 8:
                 strict[base] = got
-            # Fallback for a table parked at the end of the function: allow it
-            # anywhere in the function, but only for a dense switch whose `cmp`
-            # fixed the length exactly.
-            elif bound and cx_imm is None and lo <= got[1][0] < hi:
+            # Fallback for a table parked elsewhere in the function: dense
+            # switches only (no sparse value list); an unbounded one needs a
+            # 4+ run to count.
+            elif cx_imm is None and lo <= got[1][0] < hi and (bound or len(got[0]) >= 4):
                 loose[base] = got
         found = strict if strict else loose
         if os.environ.get('NEP_DEBUG_INFER'):
-            print(f'  INFER fn@{io:X} jmp@{ins.address:X}: bound={bound} cx={cx_imm} strict={[hex(b) for b in strict]} loose={[hex(b) for b in loose]}')
+            print(f'  INFER fn@{io:X} jmp@{ins.address:X}: bound={bound} cx={cx_imm} '
+                  f'strict={[hex(b) for b in strict]} loose={[hex(b) for b in loose]}')
         pending.append((ins, found))
-    # One function has one CS: intersect the candidate bases of every switch
-    # that failed under the guessed CS. (Adjacent tables or repeated pairs make
-    # a neighbouring base look valid for one switch, never for all of them.)
     sets = [set(f) for _, f in pending if f]
     if sets:
         common = set.intersection(*sets)
@@ -213,9 +222,55 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
             for ins_, f in pending:
                 if base in f:
                     out[ins_.address] = f[base][0]
-                    tabs.append(f[base][1])
+                    tmap[ins_.address] = f[base][1]
+                    bases[ins_.address] = base
+                    if f[base][2]:
+                        unb.add(ins_.address)
             inferred.append(base >> 4)
-    return out, inferred, tabs
+    # Unbounded table: some entries may be tail jumps to other functions (outside
+    # [lo, hi)), so the strict run above can stop early. Nothing can point into
+    # the table itself, so the table ends at the first arm target that lies
+    # after its start. If a run of entries ends exactly there (<= 128 entries),
+    # that is the real table; otherwise keep the strict run (a longer run would
+    # just be junk words that happen to land in range).
+    for addr in list(unb):
+        base = bases[addr]
+        first, _ = tmap[addr]
+        arms, limit, k = [], None, 0
+        while k < 128:
+            pos = first + 2 * k
+            if limit is not None and pos >= limit:
+                break
+            a = pos + hdr
+            if a + 2 > len(data):
+                limit = None
+                break
+            t = base + int.from_bytes(data[a:a + 2], 'little')
+            if not (base <= t < hi):
+                limit = None
+                break
+            arms.append(t)
+            if t >= first + 2:
+                limit = t if limit is None else min(limit, t)
+            k += 1
+        else:
+            limit = None
+        if limit is not None and len(arms) >= len(out[addr]):
+            out[addr] = arms
+            tmap[addr] = (first, first + 2 * len(arms))
+    # Unbounded tables run into the next table; cut each where the next starts.
+    starts = sorted({t[0] for t in tmap.values()})
+    for addr in list(unb):
+        first, end = tmap[addr]
+        nxt = next((x for x in starts if x > first), None)
+        if nxt is not None and end > nxt:
+            n = (nxt - first) // 2
+            out[addr] = out[addr][:n]
+            tmap[addr] = (first, first + 2 * n)
+            if n < 3:
+                del out[addr], tmap[addr]
+                unb.discard(addr)
+    return out, inferred, tmap, unb
 
 
 def main():
@@ -289,12 +344,13 @@ def main():
         """Decode a function around its switch tables.
 
         Linear decode first to find the tables, then decode again skipping the
-        table bytes so the arms land on real instruction boundaries. A switch
-        whose arms still miss a boundary is dropped (it dispatches at runtime).
+        table bytes so the arms land on real instruction boundaries. A bounded
+        switch with an arm off a boundary is dropped (it dispatches at
+        runtime); an unbounded one keeps its leading arms that are on
+        boundaries (its length was a guess) and the function is decoded again
+        with the shortened table.
         """
-        insns = Decoder(data[io + HDR:end + HDR], base_offset=io).decode_all()
-        jt, inf, tabs = jump_tables(data, HDR, insns, cs, io, end, io=io, infer=infer)
-        if tabs:
+        def piecewise(tabs):
             cuts, pos = [], io
             for ts, te in sorted(tabs):
                 ts, te = max(ts, pos), min(te, end)
@@ -318,8 +374,40 @@ def main():
                         if shift and o and o.type in (OpType.REL8, OpType.REL16):
                             o.disp += shift
                     insns += piece
-            offs = {x.offset for x in insns}
-            jt = {k: v for k, v in jt.items() if all(t in offs for t in v)}
+            return insns
+
+        insns = Decoder(data[io + HDR:end + HDR], base_offset=io).decode_all()
+        jt, inf, tmap, unb = jump_tables(data, HDR, insns, cs, io, end, io=io, infer=infer)
+        if tmap:
+            for _ in range(2):
+                insns = piecewise(set(tmap.values()))
+                offs = {x.offset for x in insns}
+                changed = False
+                for addr in list(jt):
+                    arms = jt[addr]
+                    if addr in unb:
+                        # arms outside this function are tail jumps (runtime
+                        # dispatch); only internal arms can be gotos, and an
+                        # internal arm off an instruction boundary is dropped.
+                        keep = [t for t in arms if not (io <= t < end) or t in offs]
+                        n = sum(1 for t in keep if io <= t < end)
+                        if len(keep) < len(arms):
+                            jt[addr] = keep
+                            changed = True
+                        arms = keep
+                        if n < 1:
+                            if os.environ.get('NEP_DEBUG_SWITCH'):
+                                print(f"  DROP fn@{io:X} jmp@{addr:X} unbounded arms="
+                                      f"{[hex(t) for t in arms[:8]]} on-boundary prefix={n}")
+                            del jt[addr], tmap[addr]
+                            changed = True
+                    elif not all(t in offs for t in arms):
+                        del jt[addr], tmap[addr]
+                        changed = True
+                if not changed:
+                    break
+            else:
+                insns = piecewise(set(tmap.values()))
         return insns, jt, inf
 
     # Segment inference from switch tables: where the segment map guessed wrong
@@ -337,6 +425,19 @@ def main():
                 cs_conflict += 1
                 continue
             cs_over[io] = inf[0]
+    def propagate_cs():
+        """A function nested in one whose CS a switch table gave inherits it
+        (forced starts overlap the analyzer's function and share its module)."""
+        ends_by_start = {io: end for _, io, end in funcs}
+        for io, cs in list(cs_over.items()):
+            if io not in ends_by_start:
+                continue
+            for _, io2, _e in funcs:
+                if io2 != io and io <= io2 < ends_by_start[io] and io2 not in cs_over \
+                        and 0 <= io2 - cs * 16 < 0x10000:
+                    cs_over[io2] = cs
+
+    propagate_cs()
     if cs_over:
         print(f"  segment overrides from switch tables: {len(cs_over)} functions "
               f"({cs_conflict} ambiguous, skipped)")
@@ -401,6 +502,7 @@ def main():
     # misses them). Far targets past the code region are data noise: ignored.
     forced_total, ignored = 0, set()
     for rnd in range(6):
+        propagate_cs()
         res = lift_pass(funcs, known)
         new = set()
         for c in res["calls"]:
