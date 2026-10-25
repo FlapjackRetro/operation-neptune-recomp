@@ -170,3 +170,25 @@ normalises them to real ESC opcodes, as the emulator does when an 8087 exists.
 the lifter emits real FPU ops (`disasm/fpu_decode.py` and `ne_lift.py` are
 the starting points). The runtime also needs an x87 stack (`dos32`/`native32`
 have one to borrow).
+
+## x87 lifting (done)
+
+- `lifter.x87 = True` turns on lift16's real x87 path (it was already there,
+  just opt-in). `X87Lifter` in `lift_full.py` adds the two opcodes ON.EXE uses
+  that lift16 lacks: `fxam` (D9 E5, 9 sites) and `fyl2xp1` (D9 F9).
+- The `x87_*` helpers the generated code calls are not in pcrecomp's runtime;
+  `src/recomp/x87.h` implements them (8 doubles, TOP, SW, CW; 32/64/80-bit and
+  16/32/64-bit-integer loads and stores; integer stores honour the control
+  word's rounding field, which Borland's `__ftol` sets to truncate).
+  `test/test_x87.c` checks them on the host (`gcc test/test_x87.c -lm`).
+  80-bit values are held as double: not bit-exact with a real 8087.
+- 8 sites still lower to `x87_unhandled` (d922, dafa, dd2e8a87, ddf6,
+  df76f6 in fn_008EC/00946/1F1CC/1F3B4/1FDCB/201D6/2119C). They are not valid
+  8087 encodings, so they are almost certainly data lifted as code; the helper
+  logs the first 16 and carries on.
+- Emulator hooks overridden (all do a bare far return): fn_00283/fn_00343 (the
+  `ds:[3F1A]`/`[3F1C]` init/exit hooks that save/restore INT 34h..3Dh/75h),
+  fn_002BD/fn_002BE (installer). Native versions are in `src/recomp/overrides.c`.
+  Not yet verified: the far-return convention against callers (needs the runtime).
+- Function count fell 752 -> 742: the emulator's own data/code no longer
+  generates junk forced starts.

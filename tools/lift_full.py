@@ -287,11 +287,28 @@ def jump_tables(data, hdr, insns, cs, lo, hi, io=None, infer=False):
 # Functions skipped by the lifter and supplied natively by the runtime
 # (same fn_XXXXX name, so callers and the dispatch table are unchanged).
 OVERRIDES = {
+    0x002BD: 'push ds + fall into the emulator installer fn_002BE (an _fpreset-style'
+             ' re-init; called from game code at 2 sites); net effect is a far return',
+    0x00283: 'emulator init hook (ds:[3F1A]): saves INT 34h..3Dh/75h, then falls into'
+             ' fn_002BD/fn_002BE; no emulator is installed here, so a no-op',
+    0x00343: 'emulator exit hook (ds:[3F1C]): restores the saved INT 34h..3Dh/75h'
+             ' vectors; nothing was installed, so a no-op',
     0x002BE: 'Borland 8087-emulator installer: hooks INT 34h..3Dh (and 3Eh/3Fh) via'
              ' INT 21h/25h and probes for an FPU. FP sites are normalised to'
              ' real ESC opcodes at lift time, so the emulator never runs; the'
              ' rest of the emulator (0x405..0x5BA) is only reachable from here',
 }
+
+
+class X87Lifter(Lifter):
+    """lift16's x87 table plus the opcodes ON.EXE uses that it lacks."""
+    def _lift_x87(self, inst):
+        if inst.fpu[0] == 0xD9 and len(inst.fpu) == 2:
+            if inst.fpu[1] == 0xE5:
+                return 'x87_fxam();'
+            if inst.fpu[1] == 0xF9:                    # fyl2xp1
+                return 'X87_ST(1) = X87_ST(1) * log2(X87_ST(0) + 1.0); x87_pop();'
+        return super()._lift_x87(inst)
 
 
 def main():
@@ -520,7 +537,8 @@ def main():
                         t = io + o.disp
                         if not (io <= t < end) and 0 <= t < code_end_img:
                             res["tail"].add(t)
-                lifter = Lifter(hdr_size=HDR, known_funcs=known)
+                lifter = X87Lifter(hdr_size=HDR, known_funcs=known)
+                lifter.x87 = True          # real x87 ops (needs x87_* in the runtime)
                 lifter.dispatch = True
                 lifter.far_base = 0
                 lifter.jump_tables = jt
@@ -688,7 +706,7 @@ def main():
             f.write('#include "recomp_all.h"\n\n' + "\n\n".join(bodies[i:i + CHUNK]) + "\n")
     with open(os.path.join(OUT, "recomp_all.h"), "w") as f:
         f.write("#ifndef RECOMP_ALL_H\n#define RECOMP_ALL_H\n")
-        f.write('#include "cpu.h"\n#include "runtime16.h"\n\n')
+        f.write('#include "cpu.h"\n#include "runtime16.h"\n#include "x87.h"\n\n')
         for sg in sorted(segs_used):
             f.write(f"#define SEG_{sg:04X} 0x{sg:04X}\n")
         f.write("\n")
