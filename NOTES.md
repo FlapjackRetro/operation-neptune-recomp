@@ -251,3 +251,15 @@ absent.
 - Bad forced starts that broke things: 00E03 (mid-instruction; E02 is the `es:` prefix), 00A40/003C0
   (`jmp cs:[bx+..]` seen with ds=FFFF), C7CB0 (timer ISR chained through a corrupted vector).
   They appear in the miss file when the game runs with the wrong video driver; remove them.
+
+## SDL2 front end
+
+- `src/recomp/frontend.h` is the seam: `frontend_sdl.c` (window, 4:3 letterbox, nearest scaling, keyboard
+  -> BIOS key queue with US scan codes) or `frontend_stub.c` (headless). CMake picks SDL2 when
+  `find_package(SDL2)` succeeds (`-DNEP_SDL=OFF` forces headless).
+- SDL runs on the main thread; the guest runs on its own 512 MB-stack thread. The guest pushes a rendered
+  RGB frame every 16 ms from `recomp_tick`; `INT 16h` waits spin `recomp_tick` so the timer ISR keeps going.
+  Closing the window longjmps the guest out through `recomp_tick`.
+- Not yet built against real SDL2 (none in the dev sandbox): the file was compile-checked against a
+  hand-written header only. Windows/MinGW also needs guards for `execinfo.h` (backtraces), SIGALRM/SIGUSR1
+  (watchdog) and `usleep`.

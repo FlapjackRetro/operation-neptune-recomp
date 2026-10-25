@@ -14,6 +14,8 @@
 #include "runtime16.h"
 #include "x87.h"
 #include "ega.h"
+#include "frontend.h"
+#include <unistd.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <execinfo.h>
@@ -222,28 +224,35 @@ void bios_int10(CPU *cpu)
 }
 
 static const char *g_keys; static int g_key_pos;
-static int next_key(void)
+static int g_pend = -1;                         /* key fetched by a peek, not yet consumed: (scan<<8)|ascii */
+/* next key without consuming: scripted NEP_KEYS first, then the window's queue */
+static int peek_key(void)
 {
+    if (g_pend >= 0) return g_pend;
     if (!g_keys) { g_keys = getenv("NEP_KEYS"); if (!g_keys) g_keys = ""; }
-    return g_keys[g_key_pos] ? (unsigned char)g_keys[g_key_pos++] : -1;
+    if (g_keys[g_key_pos]) g_pend = (unsigned char)g_keys[g_key_pos++];
+    else g_pend = fe_pop_key();
+    return g_pend;
 }
 
 void bios_int16(CPU *cpu)
 {
     trace("[16] ah=%02X\n", cpu->ah);
-    int peek = g_keys ? g_keys[g_key_pos] : 0;
-    if (!g_keys) { g_keys = getenv("NEP_KEYS"); if (!g_keys) g_keys = ""; peek = g_keys[g_key_pos]; }
     switch (cpu->ah) {
     case 0x00: case 0x10: {
-        int k = next_key();
+        int k = peek_key();
+        while (k < 0 && fe_available()) {           /* wait for the window; the timer keeps running */
+            recomp_tick(cpu); usleep(2000); k = peek_key();
+        }
         if (k < 0) { fprintf(stderr, "[16] guest waits for a key and none is scripted; stopping\n");
                      { void *bt[12]; int n = backtrace(bt, 12); backtrace_symbols_fd(bt, n, 2); }
                      cpu->halted = 1; longjmp(g_exit_jmp, 2); }
-        cpu->al = (uint8_t)k; cpu->ah = 0; break; }
-    case 0x01: case 0x11:
-        if (peek) { cpu->flags &= (uint16_t)~FLAG_ZF; cpu->al = (uint8_t)peek; cpu->ah = 0; }
+        g_pend = -1; cpu->al = (uint8_t)(k & 0xFF); cpu->ah = (uint8_t)(k >> 8); break; }
+    case 0x01: case 0x11: {
+        int k = peek_key();
+        if (k >= 0) { cpu->flags &= (uint16_t)~FLAG_ZF; cpu->al = (uint8_t)(k & 0xFF); cpu->ah = (uint8_t)(k >> 8); }
         else cpu->flags |= FLAG_ZF;
-        break;
+        break; }
     case 0x02: cpu->al = 0; break;
     default: fprintf(stderr, "[16] UNIMPLEMENTED ah=%02X\n", cpu->ah);
     }
@@ -372,6 +381,15 @@ void recomp_tick(CPU *cpu)
 {
     g_recomp_tick_budget = 4000;
     unsigned long now = host_ms();
+    if (fe_available()) {
+        static unsigned long next_present;
+        if (fe_quit_requested()) { cpu->halted = 1; longjmp(g_exit_jmp, 3); }
+        if (now >= next_present) {
+            static uint8_t buf[640 * 350 * 3]; int w, h;
+            if (!ega_render_rgb(buf, &w, &h)) fe_submit_frame(buf, w, h);
+            next_present = now + 16;
+        }
+    }
     { static unsigned long next; const char *pat = getenv("NEP_FRAMES");   /* NEP_FRAMES=prefix, NEP_FRAMES_MS=interval */
       if (pat && now >= next) { static int k; char nm[300]; const char *ms = getenv("NEP_FRAMES_MS");
           snprintf(nm, sizeof nm, "%s%03d.ppm", pat, k++); ega_dump_ppm(nm); next = now + (ms ? (unsigned)atoi(ms) : 1000); } }

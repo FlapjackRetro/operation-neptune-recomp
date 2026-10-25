@@ -145,27 +145,38 @@ static void rgb(int c, uint8_t *o)
 }
 
 uint8_t *g_vga_mem;                     /* guest memory, for mode 13h (linear A000:0) */
-int ega_dump_ppm(const char *path)
+
+/* Compose the visible screen as RGB24 into out (>= 640*350*3). 0 on success. */
+int ega_render_rgb(uint8_t *out, int *pw, int *ph)
 {
+    dac_init();
     if (g_mode == 0x13 && g_vga_mem) {        /* 320x200x256, straight DAC lookup */
-        FILE *f = fopen(path, "wb"); if (!f) return -1;
-        fprintf(f, "P6\n320 200\n255\n"); dac_init();
+        *pw = 320; *ph = 200;
         for (int i = 0; i < 64000; i++) { uint8_t *d = dac[g_vga_mem[0xA0000 + i]];
-            uint8_t px[3] = { DAC8(d[0]), DAC8(d[1]), DAC8(d[2]) }; fwrite(px, 1, 3, f); }
-        fclose(f); return 0;
+            out[i * 3] = DAC8(d[0]); out[i * 3 + 1] = DAC8(d[1]); out[i * 3 + 2] = DAC8(d[2]); }
+        return 0;
     }
-    int w = g_mode == 0x0D ? 320 : 640, h = g_mode == 0x10 ? 350 : 200;
     if (!ega_graphics()) return -1;
-    FILE *f = fopen(path, "wb"); if (!f) return -1;
-    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    int w = g_mode == 0x0D ? 320 : 640, h = g_mode == 0x10 ? 350 : 200;
+    *pw = w; *ph = h;
     int bpl = w / 8;
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             uint16_t o = (uint16_t)(g_ega_start + y * bpl + x / 8); int bit = 7 - (x & 7);
             int c = 0;
             for (int p = 0; p < 4; p++) c |= (plane[p][o] >> bit & 1) << p;
-            dac_init(); uint8_t *d = dac[attr_pal[c]]; uint8_t px[3] = { DAC8(d[0]), DAC8(d[1]), DAC8(d[2]) }; fwrite(px, 1, 3, f);
+            uint8_t *d = dac[attr_pal[c]]; uint8_t *q = out + (y * w + x) * 3;
+            q[0] = DAC8(d[0]); q[1] = DAC8(d[1]); q[2] = DAC8(d[2]);
         }
+    return 0;
+}
+
+int ega_dump_ppm(const char *path)
+{
+    static uint8_t buf[640 * 350 * 3]; int w, h;
+    if (ega_render_rgb(buf, &w, &h)) return -1;
+    FILE *f = fopen(path, "wb"); if (!f) return -1;
+    fprintf(f, "P6\n%d %d\n255\n", w, h); fwrite(buf, 3, (size_t)w * h, f);
     fclose(f); return 0;
 }
 
