@@ -16,6 +16,7 @@
 #include "ega.h"
 #include "frontend.h"
 #include <ctype.h>
+#include <math.h>
 #include <dirent.h>
 #include "portable.h"
 #include <pthread.h>
@@ -282,13 +283,31 @@ void int_handler(CPU *cpu, int vec)
 /* ---------- ports ---------- */
 
 static uint8_t g_port61, g_retrace;
+/* PIT channel 0: the game reprograms it (divisor 0x4000 = 72.8 Hz, 4x the BIOS rate), and the timer ISR
+ * must fire at that rate or all of the game's tick-based pacing runs slow. */
+static unsigned g_pit_div = 65536;          /* 0 means 65536 */
+static int g_pit_ctl_ch0 = 0, g_pit_phase = 0; static unsigned g_pit_lo;
+static int g_pit_rd_hi;
+static void pit_write_ch0(uint8_t v)
+{
+    if (g_pit_phase == 0) { g_pit_lo = v; g_pit_phase = 1; }
+    else { unsigned d = g_pit_lo | ((unsigned)v << 8); g_pit_div = d ? d : 65536; g_pit_phase = 0; }
+}
+static double pit_period_us(void) { return g_pit_div * 1000000.0 / 1193182.0; }
+volatile unsigned g_stat_pit_div = 65536;
+
 uint8_t port_in8(CPU *cpu, uint16_t port)
 {
     (void)cpu;
     { uint8_t v; if (ega_port_in(port, &v)) return v; }
     switch (port) {
     case 0x61:  g_port61 ^= 0x10; return g_port61;                   /* refresh bit toggles */
-    case 0x40:  return (uint8_t)host_ms();
+    case 0x40: {                                                     /* down-counter, low then high byte */
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+        double us = (double)(t.tv_sec % 1000) * 1e6 + t.tv_nsec / 1e3;
+        unsigned cnt = g_pit_div - (unsigned)(fmod(us * 1.193182, (double)g_pit_div));
+        g_pit_rd_hi ^= 1;
+        return (uint8_t)(g_pit_rd_hi ? cnt & 0xFF : (cnt >> 8) & 0xFF); }
     case 0x60:  return 0;
     default:    trace("[in %03X]\n", port); return 0xFF;
     }
@@ -297,6 +316,8 @@ void port_out8(CPU *cpu, uint16_t port, uint8_t val)
 {
     (void)cpu;
     if ((port >= 0x3C0 && port <= 0x3CF) || port == 0x3D4 || port == 0x3D5) ega_port_out(port, val);
+    else if (port == 0x43) { if ((val >> 6) == 0 && ((val >> 4) & 3) == 3) { g_pit_ctl_ch0 = 1; g_pit_phase = 0; } else if ((val >> 6) == 0) g_pit_ctl_ch0 = 0; }
+    else if (port == 0x40) { if (g_pit_ctl_ch0) { pit_write_ch0(val); g_stat_pit_div = g_pit_div; } }
     else if (port == 0x61) g_port61 = (uint8_t)((g_port61 & 0x10) | (val & ~0x10));
     else trace("[out %03X] = %02X\n", port, val);
 }
@@ -404,11 +425,11 @@ void recomp_tick(CPU *cpu)
     calls++; g_stat_calls = calls;
     if (next_us == 0) next_us = now_us;
     int burst = 0;
-    while (now_us >= next_us && burst < 4) {
-        next_us += 54925.4; burst++; isrs++; g_stat_isrs = isrs;
+    while (now_us >= next_us && burst < 16) {
+        next_us += pit_period_us(); burst++; isrs++; g_stat_isrs = isrs;
         run_guest_isr(cpu, 0x08);
     }
-    if (now_us > next_us + 1000000.0) next_us = now_us + 54925.4;    /* never replay a long stall */
+    if (now_us > next_us + 1000000.0) next_us = now_us + pit_period_us();    /* never replay a long stall */
     { static int stat = -1; if (stat < 0) stat = getenv("NEP_STAT") != NULL;
       if (stat && now >= stat_ms + 1000) { fprintf(stderr, "[stat] isr/s=%lu tick-calls/s=%lu\n", isrs, calls); isrs = calls = 0; stat_ms = now; } }
 }
