@@ -16,7 +16,11 @@
 #include <string.h>
 
 typedef struct { double st[8]; int top; uint16_t sw, cw; } X87State;
-static X87State g_x87 = { {0}, 0, 0, 0x037F };
+#ifdef X87_SHARED
+extern X87State g_x87;      /* one FP stack for every generated chunk (defined in runtime16.c) */
+#else
+static X87State g_x87 = { {0}, 0, 0, 0x037F };   /* single-TU host test */
+#endif
 
 #define X87_ST(i)  (g_x87.st[(g_x87.top + (i)) & 7])
 #define X87_C0 0x0100
@@ -133,5 +137,27 @@ static inline void x87_wr(CPU *cpu, uint16_t seg, uint16_t off, int kind, double
     }
     }
     for (int i = 0; i < n; i++) mem_write8(cpu, seg, (uint16_t)(off + i), (uint8_t)(u >> (8 * i)));
+}
+/* Packed BCD (fbld / fbstp): 18 digits in bytes 0..8 (low digit = low nibble
+ * of byte 0), sign in bit 7 of byte 9. fbstp rounds per the control word. */
+static inline double x87_bcd_rd(CPU *cpu, uint16_t seg, uint16_t off)
+{
+    double v = 0, m = 1;
+    for (int i = 0; i < 9; i++) {
+        uint8_t b = mem_read8(cpu, seg, (uint16_t)(off + i));
+        v += (b & 15) * m; m *= 10; v += (b >> 4) * m; m *= 10;
+    }
+    return (mem_read8(cpu, seg, (uint16_t)(off + 9)) & 0x80) ? -v : v;
+}
+
+static inline void x87_bcd_wr(CPU *cpu, uint16_t seg, uint16_t off, double v)
+{
+    double r = x87_round(v); int neg = signbit(r) != 0; r = fabs(r);
+    uint64_t u = (isnan(r) || r >= 1e18) ? 0 : (uint64_t)r;
+    for (int i = 0; i < 9; i++) {
+        uint8_t lo = u % 10; u /= 10; uint8_t hi = u % 10; u /= 10;
+        mem_write8(cpu, seg, (uint16_t)(off + i), (uint8_t)(lo | (hi << 4)));
+    }
+    mem_write8(cpu, seg, (uint16_t)(off + 9), neg ? 0x80 : 0);
 }
 #endif

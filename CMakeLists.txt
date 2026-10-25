@@ -18,6 +18,7 @@ endif()
 add_executable(nep src/main.c src/recomp/cpu.c src/recomp/runtime16.c src/recomp/overrides.c src/recomp/ega.c src/recomp/audio.cpp
   third_party/ymfm/ymfm_opl.cpp third_party/ymfm/ymfm_adpcm.cpp third_party/ymfm/ymfm_pcm.cpp ${GENERATED})
 target_include_directories(nep PRIVATE third_party/ymfm)
+target_compile_definitions(nep PRIVATE X87_SHARED)   # one FP stack across the generated chunks
 # Optional window + keyboard (SDL2). -DNEP_SDL=OFF forces the headless build.
 option(NEP_SDL "Build the SDL2 front end when SDL2 is found" ON)
 if(NEP_SDL)

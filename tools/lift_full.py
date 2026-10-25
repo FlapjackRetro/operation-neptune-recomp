@@ -52,6 +52,13 @@ from decode16 import Decoder, OpType  # noqa: E402
 from lift16 import Lifter  # noqa: E402
 import decode16  # noqa: E402
 
+# Borland's INT 3Ch segment-override byte: the top two bits are CS=0, SS=1,
+# DS=2, ES=3. pcrecomp's table has DS and ES swapped, which sent every float
+# access through an `les` pointer (`fstp qword es:[bx]`) to DS instead.
+# Evidence: `les bx,[bp+6]; int 3Ch, 0DDh,5Fh,16h` (39 sites) and
+# `mov bx,sp; int 3Ch, 59h,3Fh` (fnstcw ss:[bx]).
+decode16._EMU87_SEG = {0: 'cs', 1: 'ss', 2: 'ds', 3: 'es'}
+
 # ON.EXE's floating point is Borland 8087-emulator code (CD 34..3D + modrm).
 # Normalise it to real ESC opcodes, as the emulator does when an 8087 exists.
 decode16.EMU87_INTS = True
@@ -309,6 +316,13 @@ OVERRIDES = {
 class X87Lifter(Lifter):
     """lift16's x87 table plus the opcodes ON.EXE uses that it lacks."""
     def _lift_x87(self, inst):
+        if inst.fpu[0] == 0xDF and len(inst.fpu) >= 2 and (inst.fpu[1] >> 6) != 3 \
+                and ((inst.fpu[1] >> 3) & 7) in (4, 6):        # fbld / fbstp
+            seg, off = lift16._mem_addr(inst.op1)
+            at = f'cpu, {seg}, {off}'
+            if ((inst.fpu[1] >> 3) & 7) == 4:
+                return f'x87_push(x87_bcd_rd({at}));'
+            return f'x87_bcd_wr({at}, X87_ST(0)); x87_pop();'
         if inst.fpu[0] == 0xD9 and len(inst.fpu) == 2:
             if inst.fpu[1] == 0xE5:
                 return 'x87_fxam();'

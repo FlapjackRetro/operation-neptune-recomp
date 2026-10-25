@@ -311,3 +311,23 @@ A missed dispatch pops only 4 bytes and leaks stack every frame, which corrupted
 frame and fed garbage to `fn_0C1EF`, loading puzzle id 0 (Combination Lock) at the wrong
 place. Fix: the dispatch-miss feedback (`work/nep_misses.txt`, `tools/converge.sh`) now
 includes 0A046 0A055 0A088 0A10A 0A1B8 0A1BF 00815. SP stays constant after the fix.
+
+## Three float bugs found via the Speed Indicator puzzle ("0%", any answer accepted)
+1. **FBSTP/FBLD unhandled.** Borland's float-to-text (`fn_2119C`) stores packed BCD (`DF /6`);
+   lift16 emitted `x87_unhandled`, so printed numbers came out as 0. `X87Lifter` in
+   `tools/lift_full.py` now lifts them to `x87_bcd_wr/rd` (x87.h).
+2. **INT 3Ch segment-override table had DS and ES swapped.** The top two bits of the byte after
+   `CD 3C` are CS=0, SS=1, DS=2, ES=3 (evidence: `les bx,[bp+6]; CD 3C DD 5F 16` x39 sites, and
+   `mov bx,sp; CD 3C 59 3F` = fnstcw ss:[bx]). Every float store/load through an `les` pointer went
+   to DS. `lift_full.py` patches `decode16._EMU87_SEG` (the fix belongs upstream in pcrecomp too).
+3. **`g_x87` was `static` in x87.h, so every generated chunk had its own FP stack.** A double
+   returned in ST(0) across a chunk boundary arrived as 0. Now one global (`X87_SHARED`, defined
+   in runtime16.c, set in CMakeLists.txt).
+
+Also: all 25 entries of the object-handler jump table at DS:0x1453 (image 0x9D40+off) are now
+forced function starts (work/nep_misses.txt); scene 1's objects hit handlers the first
+play-through never reached, leaking 0xC stack bytes per frame and clobbering BP, so the puzzle
+category read as 0 (Combination Lock).
+
+Debug hooks added (env-gated): NEP_WATCHSS=<hex ss offset>, NEP_WATCHBP=<hex bp threshold>,
+`[ew-words]` line in NEP_ENTERWATCH.
