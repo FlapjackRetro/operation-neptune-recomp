@@ -70,6 +70,7 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
     SDL_Texture *tex = NULL; int tw = 0, th = 0;
     start_guest();                                 /* spawns the guest thread */
     unsigned last_ms = SDL_GetTicks(), frames = 0; unsigned long last_isr = 0, last_calls = 0;
+    SDL_SetWindowTitle(win, "Operation Neptune (recomp) build " __DATE__ " " __TIME__);
     while (!*guest_done && !g_quit) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -96,10 +97,10 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
         SDL_RenderPresent(rd);                     /* vsync paces the loop */
         frames++;
         unsigned t = SDL_GetTicks();
-        if (t - last_ms >= 1000 || frames == 1) {  /* diagnostics in the title bar */
+        if (t - last_ms >= 1000) {                 /* diagnostics in the title bar */
             char title[160]; unsigned long i = g_stat_isrs, c = g_stat_calls;
             snprintf(title, sizeof title, "Operation Neptune [" __TIME__ "] timer %lu/s ticks %lu/s %u fps (isr total %lu, calls %lu)",
-                     i - last_isr, c - last_calls, frames, i, c);
+                     (i - last_isr) * 1000 / (t - last_ms), (c - last_calls) * 1000 / (t - last_ms), frames * 1000 / (t - last_ms), i, c);
             SDL_SetWindowTitle(win, title); last_isr = i; last_calls = c; frames = 0; last_ms = t;
         }
     }
