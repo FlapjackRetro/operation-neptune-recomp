@@ -38,6 +38,7 @@
 #define ENV_SEG   0x9F10
 #define TOP_SEG   0xA000
 #define MAX_FILES 32
+static uint8_t g_kbd_latch;       /* last scan code the 'keyboard controller' delivered (port 60h) */
 #define BIOS_SEG  0xF000          /* default vectors point at a ROM iret */
 #define BIOS_IRET 0xFF53
 
@@ -329,7 +330,8 @@ uint8_t port_in8(CPU *cpu, uint16_t port)
         unsigned cnt = g_pit_div - (unsigned)(fmod(us * 1.193182, (double)g_pit_div));
         g_pit_rd_hi ^= 1;
         return (uint8_t)(g_pit_rd_hi ? cnt & 0xFF : (cnt >> 8) & 0xFF); }
-    case 0x60:  return 0;
+    case 0x60:  return g_kbd_latch;
+    case 0x64:  return 0x14;
     default:    trace("[in %03X]\n", port); return 0xFF;
     }
 }
@@ -461,6 +463,14 @@ void recomp_tick(CPU *cpu)
     while (now_us >= next_us && burst < 16) {
         next_us += pit_period_us(); burst++; isrs++; g_stat_isrs = isrs;
         run_guest_isr(cpu, 0x08);
+    }
+    if (g_vec_seg[9] != BIOS_SEG) {                      /* the game owns IRQ1: feed it raw make/break codes (arrow keys etc.) */
+        int rc = fe_pop_raw();
+        { static const char *rs = (const char *)1; static uint64_t t0; static int pos;       /* NEP_RAWSEQ="4D@9000,CD@9600": hex scan code @ ms */
+          if (rs == (const char *)1) { rs = getenv("NEP_RAWSEQ"); t0 = now; }
+          if (rc < 0 && rs && rs[pos]) { unsigned c, ms; int n = 0;
+              if (sscanf(rs + pos, "%x@%u%n", &c, &ms, &n) >= 2 && now - t0 >= ms) { rc = (int)c; pos += n; if (rs[pos] == ',') pos++; } } }
+        if (rc >= 0) { g_kbd_latch = (uint8_t)rc; run_guest_isr(cpu, 0x09); }
     }
     if (now_us > next_us + 1000000.0) next_us = now_us + pit_period_us();    /* never replay a long stall */
     { static int stat = -1; if (stat < 0) stat = getenv("NEP_STAT") != NULL;

@@ -9,6 +9,8 @@
 
 #define KQ 64
 static int g_kq[KQ]; static volatile unsigned g_kr, g_kw;     /* single producer, single consumer */
+#define RQ 128
+static int g_rq[RQ]; static volatile unsigned g_rr, g_rw;
 static pthread_mutex_t g_fm = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t g_frame[640 * 350 * 3]; static int g_fw, g_fh; static volatile int g_fnew;
 static volatile int g_quit;
@@ -18,6 +20,35 @@ int  fe_available(void) { return 1; }
 int  fe_quit_requested(void) { return g_quit; }
 void fe_push_key(int k) { if (g_kw - g_kr < KQ) { g_kq[g_kw % KQ] = k; __sync_synchronize(); g_kw++; } }
 int  fe_pop_key(void) { if (g_kr == g_kw) return -1; int k = g_kq[g_kr % KQ]; __sync_synchronize(); g_kr++; return k; }
+
+void fe_push_raw(int c) { if (g_rw - g_rr < RQ) { g_rq[g_rw % RQ] = c; __sync_synchronize(); g_rw++; } }
+int  fe_pop_raw(void) { if (g_rr == g_rw) return -1; int c = g_rq[g_rr % RQ]; __sync_synchronize(); g_rr++; return c; }
+
+/* SDL scancode -> set-1 make code (arrows/nav go out without the E0 prefix, like keypad keys with NumLock off) */
+static int set1_of(SDL_Scancode sc)
+{
+    static const unsigned char az[26] = {0x1E,0x30,0x2E,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,0x31,0x18,0x19,0x10,0x13,0x1F,0x14,0x16,0x2F,0x11,0x2D,0x15,0x2C};
+    if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) return az[sc - SDL_SCANCODE_A];
+    if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9) return 0x02 + (sc - SDL_SCANCODE_1);
+    if (sc >= SDL_SCANCODE_F1 && sc <= SDL_SCANCODE_F10) return 0x3B + (sc - SDL_SCANCODE_F1);
+    if (sc >= SDL_SCANCODE_KP_1 && sc <= SDL_SCANCODE_KP_9) { static const unsigned char kp[9] = {0x4F,0x50,0x51,0x4B,0x4C,0x4D,0x47,0x48,0x49}; return kp[sc - SDL_SCANCODE_KP_1]; }
+    switch (sc) {
+    case SDL_SCANCODE_0: return 0x0B; case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: return 0x1C;
+    case SDL_SCANCODE_ESCAPE: return 0x01; case SDL_SCANCODE_BACKSPACE: return 0x0E; case SDL_SCANCODE_TAB: return 0x0F;
+    case SDL_SCANCODE_SPACE: return 0x39; case SDL_SCANCODE_MINUS: return 0x0C; case SDL_SCANCODE_EQUALS: return 0x0D;
+    case SDL_SCANCODE_LEFTBRACKET: return 0x1A; case SDL_SCANCODE_RIGHTBRACKET: return 0x1B; case SDL_SCANCODE_BACKSLASH: return 0x2B;
+    case SDL_SCANCODE_SEMICOLON: return 0x27; case SDL_SCANCODE_APOSTROPHE: return 0x28; case SDL_SCANCODE_GRAVE: return 0x29;
+    case SDL_SCANCODE_COMMA: return 0x33; case SDL_SCANCODE_PERIOD: return 0x34; case SDL_SCANCODE_SLASH: return 0x35;
+    case SDL_SCANCODE_F11: return 0x57; case SDL_SCANCODE_F12: return 0x58;
+    case SDL_SCANCODE_HOME: return 0x47; case SDL_SCANCODE_UP: return 0x48; case SDL_SCANCODE_PAGEUP: return 0x49;
+    case SDL_SCANCODE_LEFT: return 0x4B; case SDL_SCANCODE_RIGHT: return 0x4D; case SDL_SCANCODE_END: return 0x4F;
+    case SDL_SCANCODE_DOWN: return 0x50; case SDL_SCANCODE_PAGEDOWN: return 0x51; case SDL_SCANCODE_INSERT: case SDL_SCANCODE_KP_0: return 0x52;
+    case SDL_SCANCODE_DELETE: return 0x53;
+    case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: return 0x1D; case SDL_SCANCODE_LSHIFT: return 0x2A; case SDL_SCANCODE_RSHIFT: return 0x36;
+    case SDL_SCANCODE_LALT: case SDL_SCANCODE_RALT: return 0x38; case SDL_SCANCODE_CAPSLOCK: return 0x3A;
+    default: return 0;
+    }
+}
 
 void fe_submit_frame(const uint8_t *rgb, int w, int h)
 {
@@ -91,7 +122,8 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) g_quit = 1;
-            else if (e.type == SDL_KEYDOWN) on_keydown(e.key.keysym);
+            else if (e.type == SDL_KEYDOWN) { int c = set1_of(e.key.keysym.scancode); if (c) fe_push_raw(c); on_keydown(e.key.keysym); }
+            else if (e.type == SDL_KEYUP) { int c = set1_of(e.key.keysym.scancode); if (c) fe_push_raw(c | 0x80); }
             else if (e.type == SDL_TEXTINPUT) {
                 for (const char *c = e.text.text; *c; c++) if ((unsigned char)*c < 128)
                     fe_push_key((scan_of_ascii(*c) << 8) | (unsigned char)*c);

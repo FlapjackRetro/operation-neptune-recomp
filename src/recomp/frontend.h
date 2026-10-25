@@ -9,6 +9,8 @@ int  fe_available(void);                               /* 1 = a real window exis
 int  fe_run(void (*start_guest)(void), volatile int *guest_done);   /* main thread loop; returns at quit */
 void fe_submit_frame(const uint8_t *rgb, int w, int h); /* guest thread: newest screen */
 int  fe_pop_key(void);                                  /* guest thread: (scan << 8) | ascii, or -1 */
+int  fe_pop_raw(void);                                  /* guest thread: next set-1 scan code (bit 7 = release), or -1 */
+void fe_push_raw(int code);
 int  fe_quit_requested(void);
 void fe_push_key(int scan_ascii);                       /* used by the SDL event code and tests */
 #endif
