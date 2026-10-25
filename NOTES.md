@@ -303,3 +303,11 @@ the flags word on every tick (the iret stub pops ip, cs *and* flags), and
 Debug aids (env, off by default): `NEP_SPLOG` (ss:sp + tick counter every 500 ms),
 `NEP_SPBT=<sp>` (backtrace first time SP drops below value), `NEP_SPWATCH=<sp>`
 (function-entry ring when SP drops below value), `NEP_WATCH_MS` (gdb hook).
+
+## Jump-table handlers must be forced function starts (wrong-puzzle bug)
+Handlers reached via `jmp [bx]` tables (object loop table at DS:0x1453, seg 09D4) that sit
+inside another lifted function's body are not dispatchable unless they are function starts.
+A missed dispatch pops only 4 bytes and leaks stack every frame, which corrupted `fn_08CB4`'s
+frame and fed garbage to `fn_0C1EF`, loading puzzle id 0 (Combination Lock) at the wrong
+place. Fix: the dispatch-miss feedback (`work/nep_misses.txt`, `tools/converge.sh`) now
+includes 0A046 0A055 0A088 0A10A 0A1B8 0A1BF 00815. SP stays constant after the fix.
