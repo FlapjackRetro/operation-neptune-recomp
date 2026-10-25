@@ -25,6 +25,7 @@ int  nep_load_image(CPU *cpu, const char *exe_path);
 void nep_set_game_dir(const char *dir);
 void nep_run(CPU *cpu);                 /* runs the startup; returns at exit */
 extern int nep_exit_code;
+extern volatile unsigned long g_stat_isrs, g_stat_calls;   /* timer ISRs run / recomp_tick calls so far */
 void nep_dump_frame(CPU *cpu, const char *ppm_path);
 
 #endif

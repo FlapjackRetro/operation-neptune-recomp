@@ -1,5 +1,6 @@
 /* SDL2 front end: window with the guest's screen, keyboard -> BIOS key queue. */
 #include "frontend.h"
+#include "runtime16.h"
 #include <SDL.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -68,6 +69,7 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
     SDL_StartTextInput();
     SDL_Texture *tex = NULL; int tw = 0, th = 0;
     start_guest();                                 /* spawns the guest thread */
+    unsigned last_ms = SDL_GetTicks(), frames = 0; unsigned long last_isr = 0, last_calls = 0;
     while (!*guest_done && !g_quit) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -92,6 +94,14 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
         SDL_RenderClear(rd);
         if (tex) SDL_RenderCopy(rd, tex, NULL, NULL);
         SDL_RenderPresent(rd);                     /* vsync paces the loop */
+        frames++;
+        unsigned t = SDL_GetTicks();
+        if (t - last_ms >= 1000) {                 /* diagnostics in the title bar */
+            char title[160]; unsigned long i = g_stat_isrs, c = g_stat_calls;
+            snprintf(title, sizeof title, "Operation Neptune (recomp) - timer %lu/s, ticks %lu/s, %u fps",
+                     i - last_isr, c - last_calls, frames);
+            SDL_SetWindowTitle(win, title); last_isr = i; last_calls = c; frames = 0; last_ms = t;
+        }
     }
     if (tex) SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(rd); SDL_DestroyWindow(win); SDL_Quit();

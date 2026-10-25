@@ -100,12 +100,12 @@ static void dos_ok(CPU *cpu) { cpu->flags &= (uint16_t)~FLAG_CF; }
 
 /* ---------- time ---------- */
 
-static unsigned long host_ms(void)
+static uint64_t host_ms(void)     /* 64-bit: unsigned long is 32 bits on Windows */
 {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
-    return (unsigned long)(t.tv_sec * 1000UL + t.tv_nsec / 1000000UL);
+    return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
 }
-static unsigned long bios_ticks(void) { return host_ms() * 182UL / 10000UL; }   /* 18.2 Hz */
+static unsigned long bios_ticks(void) { return (unsigned long)(host_ms() * 182u / 10000u); }   /* 18.2 Hz */
 
 /* ---------- INT 21h ---------- */
 
@@ -378,10 +378,11 @@ static void run_guest_isr(CPU *cpu, int vec)
     *cpu = saved;
 }
 
+volatile unsigned long g_stat_isrs, g_stat_calls;   /* read by the window for its title */
 void recomp_tick(CPU *cpu)
 {
     g_recomp_tick_budget = 4000;
-    unsigned long now = host_ms();
+    uint64_t now = host_ms();
     if (fe_available()) {
         static unsigned long next_present;
         if (fe_quit_requested()) { cpu->halted = 1; longjmp(g_exit_jmp, 3); }
@@ -398,13 +399,13 @@ void recomp_tick(CPU *cpu)
     /* PIT channel 0 at its default rate: 1193182 / 65536 = 18.2065 Hz (54.9254 ms). The ISR can only run
      * here, so when the guest spends a long time between loop back-edges ticks arrive late; run the
      * missed ones (a few at a time) so game time keeps pace with the wall clock. */
-    static double next_us; static unsigned long isrs, calls, stat_ms;
+    static double next_us; static unsigned long isrs, calls; static uint64_t stat_ms;
     double now_us = (double)now * 1000.0;
-    calls++;
+    calls++; g_stat_calls = calls;
     if (next_us == 0) next_us = now_us;
     int burst = 0;
     while (now_us >= next_us && burst < 4) {
-        next_us += 54925.4; burst++; isrs++;
+        next_us += 54925.4; burst++; isrs++; g_stat_isrs = isrs;
         run_guest_isr(cpu, 0x08);
     }
     if (now_us > next_us + 1000000.0) next_us = now_us + 54925.4;    /* never replay a long stall */
