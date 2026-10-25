@@ -5,6 +5,7 @@
 #include <SDL.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define KQ 64
@@ -118,16 +119,31 @@ int fe_run(void (*start_guest)(void), volatile int *guest_done)
     start_guest();                                 /* spawns the guest thread */
     unsigned last_ms = SDL_GetTicks(), frames = 0; unsigned long last_isr = 0, last_calls = 0;
     SDL_SetWindowTitle(win, "Operation Neptune (recomp) build " __DATE__ " " __TIME__);
+    int vdiv = 1;                                  /* present every vdiv-th vsync: ~60 fps on 120/144 Hz monitors (VGA was 60-70 Hz) */
+    { SDL_DisplayMode dm; if (SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(win), &dm) == 0 && dm.refresh_rate >= 100) vdiv = (dm.refresh_rate + 30) / 60;
+      const char *e = getenv("NEP_VSYNC_DIV"); if (e && atoi(e) > 0) vdiv = atoi(e); }
+    Uint64 lastp = 0; int rep_skip = 0;
     while (!*guest_done && !g_quit) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) g_quit = 1;
-            else if (e.type == SDL_KEYDOWN) { int c = set1_of(e.key.keysym.scancode); if (c) fe_push_raw(c); on_keydown(e.key.keysym); }
+            else if (e.type == SDL_KEYDOWN) {
+                int c = set1_of(e.key.keysym.scancode); if (c) fe_push_raw(c);
+                /* Auto-repeat must not build a backlog in the INT 16h queue: a held Up would queue ~30 entries/s and
+                 * a Space pressed meanwhile (fire!) waited behind them. Repeats only enter an empty queue. */
+                rep_skip = e.key.repeat && g_kw != g_kr;
+                if (!rep_skip) on_keydown(e.key.keysym);
+            }
             else if (e.type == SDL_KEYUP) { int c = set1_of(e.key.keysym.scancode); if (c) fe_push_raw(c | 0x80); }
             else if (e.type == SDL_TEXTINPUT) {
-                for (const char *c = e.text.text; *c; c++) if ((unsigned char)*c < 128)
+                if (!rep_skip) for (const char *c = e.text.text; *c; c++) if ((unsigned char)*c < 128)
                     fe_push_key((scan_of_ascii(*c) << 8) | (unsigned char)*c);
             }
+        }
+        if (vdiv > 1) {                            /* time-gate presents to ~60/s; keep polling input every ms in between */
+            Uint64 nowc = SDL_GetPerformanceCounter();
+            if (lastp && (double)(nowc - lastp) * 1000.0 / (double)SDL_GetPerformanceFrequency() < 1000.0 / 60.0 - 1.5) { SDL_Delay(1); continue; }
+            lastp = nowc;
         }
         pthread_mutex_lock(&g_fm);
         if (g_fnew) {
