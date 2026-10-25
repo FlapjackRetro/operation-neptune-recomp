@@ -395,12 +395,21 @@ void recomp_tick(CPU *cpu)
       if (pat && now >= next) { static int k; char nm[300]; const char *ms = getenv("NEP_FRAMES_MS");
           snprintf(nm, sizeof nm, "%s%03d.ppm", pat, k++); ega_dump_ppm(nm); next = now + (ms ? (unsigned)atoi(ms) : 1000); } }
     if (g_in_isr) return;
-    if (!g_next_tick) g_next_tick = now;
-    if (now >= g_next_tick) {
-        g_next_tick += 55;
-        if (now > g_next_tick + 1000) g_next_tick = now + 55;     /* never replay a backlog */
+    /* PIT channel 0 at its default rate: 1193182 / 65536 = 18.2065 Hz (54.9254 ms). The ISR can only run
+     * here, so when the guest spends a long time between loop back-edges ticks arrive late; run the
+     * missed ones (a few at a time) so game time keeps pace with the wall clock. */
+    static double next_us; static unsigned long isrs, calls, stat_ms;
+    double now_us = (double)now * 1000.0;
+    calls++;
+    if (next_us == 0) next_us = now_us;
+    int burst = 0;
+    while (now_us >= next_us && burst < 4) {
+        next_us += 54925.4; burst++; isrs++;
         run_guest_isr(cpu, 0x08);
     }
+    if (now_us > next_us + 1000000.0) next_us = now_us + 54925.4;    /* never replay a long stall */
+    { static int stat = -1; if (stat < 0) stat = getenv("NEP_STAT") != NULL;
+      if (stat && now >= stat_ms + 1000) { fprintf(stderr, "[stat] isr/s=%lu tick-calls/s=%lu\n", isrs, calls); isrs = calls = 0; stat_ms = now; } }
 }
 
 /* ---------- function entry census (NEP_CENSUS=file) ---------- */
