@@ -497,6 +497,18 @@ void recomp_enter(const char *fn)
       if (sw && g_cpu && shown < 3) { rn[rpp % 40] = fn; rs[rpp % 40] = g_cpu->bp; rpp++;
         if ((sw > 0 ? g_cpu->sp < sw : (g_cpu->bp == 0 && rpp > 5000)) ) { shown++; fprintf(stderr, "[spw] sp=%04X bp=%04X; stack words:", g_cpu->sp, g_cpu->bp); for (int w = 0; w < 12; w++) fprintf(stderr, " %04X", (unsigned)(g_cpu->mem[((uint32_t)g_cpu->ss<<4)+(uint16_t)(g_cpu->sp+2*w)] | (g_cpu->mem[((uint32_t)g_cpu->ss<<4)+(uint16_t)(g_cpu->sp+2*w+1)]<<8))); fprintf(stderr, "\n"); { void *bt[16]; int n = backtrace(bt, 16); backtrace_symbols_fd(bt, n, 2); } fprintf(stderr, " recent entries (oldest first):\n");
           for (int i = 40; i >= 1; i--) { int k = (rpp - i + 400) % 40; if (rn[k]) fprintf(stderr, "   %s sp=%04X\n", rn[k], rs[k]); } } } }
+    { static const char *ew = (const char *)1; static const char *ring[400]; static uint16_t rsp[400]; static int rp, shown;     /* NEP_ENTERWATCH=fn_xxxxx: report first calls with arg + recent entries */
+      if (ew == (const char *)1) ew = getenv("NEP_ENTERWATCH");
+      if (ew && g_cpu) { rsp[rp % 400] = g_cpu->sp; ring[rp++ % 400] = fn;
+        if (!strcmp(fn, ew) && shown < 3) { shown++; uint32_t a = ((uint32_t)g_cpu->ss << 4) + g_cpu->sp;
+          fprintf(stderr, "[ew] %s arg=%04X %04X sp=%04X recent:", fn, g_cpu->mem[a+4] | g_cpu->mem[a+5] << 8, g_cpu->mem[a+6] | g_cpu->mem[a+7] << 8, g_cpu->sp);
+          for (int i = 400; i >= 1; i--) { int k = (rp - i + 4000) % 400; if (ring[k] && strncmp(ring[k], "fn_1C", 5) && strncmp(ring[k], "fn_1D", 5)) fprintf(stderr, " %s@%04X", ring[k], rsp[k]); } fprintf(stderr, "\n"); { void *bt[8]; int n = backtrace(bt, 8); backtrace_symbols_fd(bt, n, 2); fprintf(stderr, "[ew] A80C=%04X 9B23=%02X A87B=%02X A806=%04X A800=%04X A802=%04X\n", mem_r16(g_cpu,0xA80C), mem_r16(g_cpu,0x9B23)&0xFF, mem_r16(g_cpu,0xA87B)&0xFF, mem_r16(g_cpu,0xA806), mem_r16(g_cpu,0xA800), mem_r16(g_cpu,0xA802)); } } } }
+    { static const char *el = (const char *)1; static int nlog;          /* NEP_ENTERLOG=fn_a,fn_b: log each entry (time, arg words) */
+      if (el == (const char *)1) el = getenv("NEP_ENTERLOG");
+      if (el && g_cpu && nlog < (getenv("NEP_ELMAX") ? atoi(getenv("NEP_ELMAX")) : 200)) { char key[32]; snprintf(key, sizeof key, ",%s,", fn); char all[512]; snprintf(all, sizeof all, ",%s,", el);
+        if ((el[0] == '*' && strncmp(fn, "fn_1C", 5) && strncmp(fn, "fn_1D", 5) && strcmp(fn, "fn_02508") && mem_r16(g_cpu,0xA80C) >= 0x10 && mem_r16(g_cpu,0xA80C) <= 0x12) || strstr(all, key)) { nlog++; uint32_t a = ((uint32_t)g_cpu->ss << 4) + g_cpu->sp;
+          { uint32_t b = ((uint32_t)g_cpu->ss << 4); uint16_t bp = g_cpu->bp; fprintf(stderr, "[el] bp-0xA=%04X bp-0xC=%04X bp-0x14=%04X ", g_cpu->mem[b+(uint16_t)(bp-0xA)] | g_cpu->mem[b+(uint16_t)(bp-0xA)+1] << 8, g_cpu->mem[b+(uint16_t)(bp-0xC)] | g_cpu->mem[b+(uint16_t)(bp-0xC)+1] << 8, g_cpu->mem[b+(uint16_t)(bp-0x14)] | g_cpu->mem[b+(uint16_t)(bp-0x14)+1] << 8); }
+          fprintf(stderr, "[el] sp=%04X %s args=%04X %04X %04X A80C=%04X scene=%02X pos=%04X,%04X\n", g_cpu->sp, fn, g_cpu->mem[a+4] | g_cpu->mem[a+5] << 8, g_cpu->mem[a+6] | g_cpu->mem[a+7] << 8, g_cpu->mem[a+8] | g_cpu->mem[a+9] << 8, mem_r16(g_cpu,0xA80C), mem_r16(g_cpu,0x9B23)&0xFF, mem_r16(g_cpu,0xA800), mem_r16(g_cpu,0xA802)); } } }
     if (!g_census_on) return;
     unsigned h = (unsigned)(((uintptr_t)fn >> 3) * 2654435761u) % CENSUS_N;
     for (int i = 0; i < CENSUS_N; i++, h = (h + 1) % CENSUS_N) {
